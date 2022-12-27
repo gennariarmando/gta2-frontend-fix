@@ -8,8 +8,8 @@ public:
     std::array<int, NUM_CONTROLKEYS> controlKeys;
 
     // Audio
-    char sfxVolume;
-    char musicVolume;
+    int sfxVolume;
+    int musicVolume;
 
     // Display
     int screenWidth;
@@ -20,8 +20,11 @@ public:
     int lightingType;
     char language;
 
+    // Internal
+    bool initialised;
+
 public:
-    void Clear();
+    void Clear(bool clearOnly = false);
     void Save();
     void Load();
     void PassSettingsToGame();

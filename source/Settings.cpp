@@ -1,12 +1,15 @@
 #include "plugin.h"
 #include "Settings.h"
 #include "tGraphics.h"
-#include "cDMAudio.h"
+#include "CAudioManager.h"
 #include "pugixml.hpp"
 #include <Shlwapi.h>
 #include <dinput.h>
 #include "CGame.h"
 #include "CText.h"
+#include "cSampleManager.h"
+#include "cDMAudio.h"
+#include "Main.h"
 
 #pragma comment(lib, "shlwapi")
 
@@ -15,10 +18,12 @@
 char* userFilesFolder = "ufiles\\";
 char* settingsFileName = "ufiles\\settings.xml";
 
-void CSettings::Clear() {
-    // DMA Design Ltd sowwy :(
-    SHDeleteKeyA(HKEY_CURRENT_USER, "SOFTWARE\\DMA Design Ltd\\GTA2");
-    SHDeleteKeyA(HKEY_LOCAL_MACHINE, "SOFTWARE\\DMA Design Ltd\\GTA2");
+void CSettings::Clear(bool clearOnly) {
+    if (!clearOnly) {
+        // DMA Design Ltd sowwy :(
+        SHDeleteKeyA(HKEY_CURRENT_USER, "SOFTWARE\\DMA Design Ltd\\GTA2");
+        SHDeleteKeyA(HKEY_LOCAL_MACHINE, "SOFTWARE\\DMA Design Ltd\\GTA2");
+    }
 
     // Controls
     controlKeys[CONTROLKEY_FORWARD] = DIK_W;
@@ -35,17 +40,21 @@ void CSettings::Clear() {
     controlKeys[CONTROLKEY_UNKNOWN] = DIK_RSHIFT;
 
     // Audio
-    sfxVolume = 127;
-    musicVolume = 127;
+    sfxVolume = 87;
+    musicVolume = 87;
 
     // Display
-    screenWidth = 640;
-    screenHeight = 480;
-    screenType = 1;
+    if (!clearOnly) {
+        screenWidth = 640;
+        screenHeight = 480;
+        screenType = 1;
+    }
 
     // Game
     lightingType = 1;
     language = 'e';
+
+    initialised = true;
 }
 
 void CSettings::Save() {
@@ -82,6 +91,9 @@ void CSettings::Save() {
 
         char* st = NULL;
         switch (screenType) {
+        case 2:
+            st = "borderless windowed";
+            break;
         case 1:
             st = "windowed";
             break;
@@ -110,11 +122,8 @@ void CSettings::Save() {
         game.append_child("Language").append_attribute("value").set_value(buff);
     }
 
-    bool file = doc.save_file(settingsFileName);
-    if (CreateDirectory(userFilesFolder, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) {
-        if (!file) {
-            printf("XML: Settings file can't be saved.");
-        }
+    if (CreateDirectoryA(userFilesFolder, NULL) || GetLastError() == ERROR_ALREADY_EXISTS) {
+        doc.save_file(settingsFileName);
     }
 
     PassSettingsToGame();
@@ -150,16 +159,16 @@ void CSettings::Load() {
             if (auto audio = settings.child("audio")) {
                 sfxVolume = audio.child("SfxVolume").attribute("value").as_int(sfxVolume);
                 musicVolume = audio.child("MusicVolume").attribute("value").as_int(musicVolume);
-
-                sfxVolume = Clamp(sfxVolume, 0, 127);
-                musicVolume = Clamp(sfxVolume, 0, 127);
             }
 
             if (auto display = settings.child("display")) {
                 screenWidth = display.child("ScreenWidth").attribute("value").as_int(screenWidth);
                 screenHeight = display.child("ScreenHeight").attribute("value").as_int(screenWidth);
                 const char* st = display.child("ScreenType").attribute("value").as_string("windowed");
-                if (!strcmp(st, "windowed")) {
+                if (!strcmp(st, "borderless windowed")) {
+                    screenType = 2;
+                }
+                else if (!strcmp(st, "windowed")) {
                     screenType = 1;
                 }
                 else if (!strcmp(st, "fullscreen")) {
@@ -206,10 +215,14 @@ void CSettings::PassSettingsToGame() {
     DMAudio.SetCurrent3DProvider(0);
     DMAudio.SetEffectsMasterVolume(sfxVolume);
     DMAudio.SetMusicMasterVolume(musicVolume);
+    SampleManager.SetStreamVolume(0, musicVolume);
+    SampleManager.SetStreamVolume(1, sfxVolume);
 
     // Display
     window_width = screenWidth;
     window_height = screenHeight;
+    full_width = screenWidth;
+    full_height = screenHeight;
     start_mode = screenType;
     max_frame_rate = 1;
     min_frame_rate = 1;
@@ -218,9 +231,18 @@ void CSettings::PassSettingsToGame() {
 
     // Game
     lighting = lightingType;
+    lightFlag = lighting ? 0x8000 : 0;
+
     if (GetTheText()) {
         GetTheText()->language = language;
         GetTheText()->Unload();
         GetTheText()->Load();
+    }
+
+    if (BobTheText) {
+        BobTheText->language = language;
+        BobTheText->Unload();
+        //BobTheText->Load();
+        CText__Load(BobTheText, true);
     }
 }

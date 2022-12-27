@@ -109,3 +109,80 @@ static void DrawSATarget(float x, float y, float dist, float rotationMult, CRGBA
     DrawTriangle(x, y, b * 0.8f, b, CVector2D(0.0f, dist + 1.0f), DegToRad(180.0f) - angle, CRGBA(0, 0, 0, col.a));
     DrawTriangle(x, y, s * 0.8f, s, CVector2D(0.0f, dist + 1.0f), DegToRad(180.0f) - angle, col);
 }
+
+#include "CText.h"
+
+static wchar_t UpperCaseTable[128] = {
+    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138,
+    139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149,
+    150, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137,
+    138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148,
+    149, 173, 173, 175, 176, 177, 178, 179, 180, 181, 182,
+    183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193,
+    194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204,
+    205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215,
+    216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226,
+    227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237,
+    238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248,
+    249, 250, 251, 252, 253, 254, 255
+};
+
+static wchar_t FrenchUpperCaseTable[128] = {
+    128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138,
+    139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149,
+    150, 65, 65, 65, 65, 132, 133, 69, 69, 69, 69, 73, 73,
+    73, 73, 79, 79, 79, 79, 85, 85, 85, 85, 173, 173, 175,
+    176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186,
+    187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197,
+    198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208,
+    209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219,
+    220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230,
+    231, 232, 233, 234, 235, 236, 237, 238, 239, 240, 241,
+    242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252,
+    253, 254, 255
+};
+
+static wchar_t GetUpperCase(wchar_t c) {
+    if (c >= 'a' && c <= 'z')
+        return c - 32;
+
+    switch (GetTheText()->language) {
+    case 'e':
+        break;
+    case 'f':
+        if (c >= 128 && c <= 255)
+            return FrenchUpperCaseTable[c - 128];
+        break;
+    case 'g':
+    case 'i':
+    case 's':   
+        if (c >= 128 && c <= 255)
+            return UpperCaseTable[c - 128];
+        break;
+    default:
+        break;
+    }
+    return c;
+}
+
+static wchar_t GetLowerCase(wchar_t c) {
+    if (c >= 'A' && c <= 'Z')
+        return c + 32;
+}
+
+static std::wstring buff = {};
+static wchar_t* UpperCase(wchar_t* s) {
+    buff = s;
+    for (auto& it : buff)
+        it = GetUpperCase(it);
+
+    return (wchar_t*)buff.c_str();
+}
+
+static wchar_t* LowerCase(wchar_t* s) {
+    buff = s;
+    for (auto& it : buff)
+        it = GetLowerCase(it);
+
+    return (wchar_t*)buff.c_str();
+}
