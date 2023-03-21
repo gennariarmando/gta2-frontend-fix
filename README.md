@@ -55,6 +55,10 @@ Archive content:
 - FrontendFixII.asi
 - FrontendFixII.ini
 - Data\GTAudio\M.wav
+- Data\frontend\Load00.tga
+- Data\frontend\Load01.tga
+- Data\frontend\Load02.tga
+- Data\frontend\Load03.tga
 
 Paste the content of the "data" folder into your GTA2 "data" directory.\
 Create a folder called "scripts" inside your GTA2 directory and paste both FrontendFixII.asi and FrontendFix.ini in it.
