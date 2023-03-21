@@ -2073,7 +2073,7 @@ public:
         plugin::patch::Nop(0x459AF7, 10);
 
         // Skip intro
-        //plugin::patch::Set<BYTE>(0x4D145C + 2, 0);
+        plugin::patch::Set<BYTE>(0x4D145C + 2, 0);
 
         // 30 fps
         //plugin::patch::Set<BYTE>(0x45A472 + 2, 30);
