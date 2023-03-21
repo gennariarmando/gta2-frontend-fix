@@ -36,10 +36,10 @@ project "gta2-frontend-fix"
 			"$(PLUGIN_SDK_DIR)/plugin_II/",
 			"$(PLUGIN_SDK_DIR)/plugin_II/game_II/",
 		}
-		targetname "GTA2FrontendFix"
+		targetname "FrontendFixII"
 		debugdir "$(GTA_II_DIR)"
 		debugcommand "$(GTA_II_DIR)/gta2.exe"
-		postbuildcommands "copy /y \"$(TargetPath)\" \"$(GTA_II_DIR)\\scripts\\GTA2FrontendFix.asi\""
+		postbuildcommands "copy /y \"$(TargetPath)\" \"$(GTA_II_DIR)\\scripts\\FrontendFixII.asi\""
 
 	filter { }
 	

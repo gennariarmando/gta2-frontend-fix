@@ -186,3 +186,52 @@ static wchar_t* LowerCase(wchar_t* s) {
 
     return (wchar_t*)buff.c_str();
 }
+
+static float GetRadianAngleBetweenPoints(float x1, float y1, float x2, float y2) {
+    float x = x2 - x1;
+    float y = y2 - y1;
+
+    if (y == 0.0f)
+        y = 0.0001f;
+
+    if (x > 0.0f) {
+        if (y > 0.0f)
+            return M_PI - atan2f(x / y, 1.0f);
+        else
+            return -atan2f(x / y, 1.0f);
+    }
+    else {
+        if (y > 0.0f)
+            return -(M_PI + atan2f(x / y, 1.0f));
+        else
+            return -atan2f(x / y, 1.0f);
+    }
+}
+
+static float LimitRadianAngle(float angle) {
+    float result = Clamp(angle, -25.0f, 25.0f);
+
+    while (result >= M_PI) {
+        result -= 2 * M_PI;
+    }
+
+    while (result < -M_PI) {
+        result += 2 * M_PI;
+    }
+
+    return result;
+}
+
+static CVector2D LimitMousePosition(CVector2D const& pos, CVector2D const& centre, float radius) {
+    float dist = (pos - centre).Magnitude();
+
+    CVector2D out = pos;
+    if (dist > radius) {
+        CVector2D fromOriginToObject = pos - centre;
+        fromOriginToObject *= radius / dist;
+        out.x = centre.x + fromOriginToObject.x;
+        out.y = centre.y + fromOriginToObject.y;
+    }
+
+    return out;
+}

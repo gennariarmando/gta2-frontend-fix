@@ -11,6 +11,8 @@
 #include "CGlobal.h"
 #include "CKeybrd.h"
 #include "Settings.h"
+#include "GameSettings.h"
+
 #include "CChar.h"
 #include "cSampleManager.h"
 #include "CAudioManager.h"
@@ -20,14 +22,23 @@
 #include "Main.h"
 #include "CStyle.h"
 #include "CTextureManager.h"
-
+#include "CGeneral.h"
+#include "CFont.h"
 #include "tVideo.h"
+#include "eScriptCommands.h"
+#include "CReplay.h"
+#include "CCamera.h"
+#include "CReplay.h"
+
+#include "ModuleList.hpp"
+#include "GInputAPI.h"
+
 #include "PsxSprites.h"
 
-#include <shellscalingapi.h>
-#include <io.h>
 #include <fcntl.h>
 #include <iostream>
+#include <array>
+#include <format>
 
 #include "..\injector\calling.hpp"
 #include "..\injector\utility.hpp"
@@ -35,35 +46,7 @@
 #include "..\injector\assembly.hpp"
 #include "..\injector\gvm\gvm.hpp"
 
-#pragma comment(lib, "Shcore")
-
-#define MENU_LEFT_PERCENTAGE (0.44f)
-#define MENU_RIGHT_PERCENTAGE (0.56f)
-
-#define MENU_BACKGROUND_WIDTH (640.0f)
-#define MENU_BACKGROUND_HEIGHT (480.0f)
-
-#define MENU_BACKGROUND_LEFT_WIDTH (MENU_BACKGROUND_WIDTH * MENU_LEFT_PERCENTAGE)
-#define MENU_BACKGROUND_RIGHT_WIDTH (MENU_BACKGROUND_WIDTH * MENU_RIGHT_PERCENTAGE)
-
-#define HD_FRONTEND 0
-
-#define MAX_LOCK_ON_DIST 15.0f
-
-enum {
-    CUSTOMMENUACTION_SFX = 10,
-    CUSTOMMENUACTION_MUSIC,
-    CUSTOMMENUACTION_CHANGERES,
-    CUSTOMMENUACTION_SCREENTYPE,
-    CUSTOMMENUACTION_LANGUAGE,
-    CUSTOMMENUACTION_LIGHTING,
-    CUSTOMMENUACTION_REDEFINEKEY,
-    CUSTOMMENUACTION_RESTOREDEFAULT,
-};
-
-#include <array>
-
-std::array<CSprite2d, 6> psxSprites;
+std::array<CSprite2d, 7> psxSprites;
 
 std::vector<CSprite2d*> frontendSprites;
 std::vector<std::string> frontendTexFileNames = {
@@ -103,13 +86,7 @@ CSprite2d logo;
 #endif
 
 bool full_screen = false;
-CSettings gameSettings;
-
-struct tResList {
-    int w;
-    int h;
-    wchar_t str[16];
-};
+CGameSettings gameSettings;
 
 std::vector<tResList> listOfRes;
 int currentScreenResIndex = 0;
@@ -129,7 +106,7 @@ int frontendSoundTime = 0;
 
 const char lang[6] = { 'e', 'f', 'g', 'i', 's', 'j' };
 
-CText* BobTheText;
+//CText* BobTheText;
 
 CStyle* FStyle;
 CStyle* DefaultStyle;
@@ -378,7 +355,7 @@ const char* dinputKeyNamesBob[DIK_MEDIASELECT + 1] = {
     "kmediaselect", //237
 };
 
-const wchar_t* dinputKeyNames[DIK_MEDIASELECT + 1] = {
+const wchar_t* dinputKeyNames[DIK_MEDIASELECT + 1 + 5] = {
     L"UNBOUND", //0
     L"ESCAPE", //1
     L"1", //2
@@ -617,10 +594,12 @@ const wchar_t* dinputKeyNames[DIK_MEDIASELECT + 1] = {
     L"MYCOMPUTER", //235
     L"MAIL", //236
     L"MEDIASELECT", //237
+    L"LMB",
+    L"RMB",
+    L"MMB",
+    L"WHEELUP",
+    L"WHEELDN",
 };
-
-CPed* lockOnTarget;
-bool hasLockOnTarget;
 
 static int menuColorPulse = 255;
 
@@ -644,8 +623,113 @@ void CText__Load(CText* text, bool bob) {
     text->Update(text->data.chars);
 }
 
-class FrontendFix {
+LPDIRECTINPUTA gDInput = NULL;
+LPDIRECTINPUTDEVICEA gMouse;
+
+CMouseState OldMouseState;
+CMouseState NewMouseState;
+
+bool ShowMouse = false;
+float PrevMousePosX = 0.0f;
+float PrevMousePosY = 0.0f;
+float MousePosX = 0.0f;
+float MousePosY = 0.0f;
+bool UsingGamePad = false;
+
+short hoverMenuItem = -1;
+bool wasMouseClick = false;
+char arrowClick = 0;
+
+class FrontendFixII {
 public:
+    static HRESULT InitMouse() {
+        if (gDInput || gMouse)
+            return -1;
+
+        HRESULT hr = DirectInput8Create(GetModuleHandle(NULL), DIRECTINPUT_VERSION, IID_IDirectInput8, (void**)&gDInput, NULL);
+        if (FAILED(hr))
+            return hr;
+
+        hr = gDInput->CreateDevice(GUID_SysMouse, &gMouse, NULL);
+        if (FAILED(hr))
+            return hr;
+
+        hr = gMouse->SetDataFormat(&c_dfDIMouse);
+        if (FAILED(hr))
+            return hr;
+
+        hr = gMouse->SetCooperativeLevel(GetHWnd(), DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
+        if (FAILED(hr))
+            return hr;
+
+        gMouse->Acquire();
+
+        return hr;
+    }
+
+    static void UpdateMouse() {
+        if (!gMouse)
+            return;
+
+        DIMOUSESTATE dims = {};
+        HRESULT hr = gMouse->GetDeviceState(sizeof(DIMOUSESTATE), &dims);
+
+        if (hr == DIERR_INPUTLOST || hr == DIERR_NOTACQUIRED)
+            gMouse->Acquire();
+
+        OldMouseState = NewMouseState;
+        NewMouseState.buttons[0] = (dims.rgbButtons[0] & 0x80) ? 255 : 0;
+        NewMouseState.buttons[1] = (dims.rgbButtons[1] & 0x80) ? 255 : 0;
+        NewMouseState.buttons[2] = (dims.rgbButtons[2] & 0x80) ? 255 : 0;
+        NewMouseState.x = static_cast<float>(dims.lX) / 255.0f;
+        NewMouseState.y = static_cast<float>(dims.lY) / 255.0f;
+
+        NewMouseState.buttons[3] = dims.lZ > 0 ? 255 : 0;
+        NewMouseState.buttons[4] = dims.lZ < 0 ? 255 : 0;
+
+        if (settings.ClipMousePosition) {
+            RECT rect;
+            GetWindowRect(GetHWnd(), &rect);
+            if (GetActiveWindow() == GetHWnd())
+                ClipCursor(&rect);
+        }
+
+        POINT p;
+        if (GetActiveWindow() == GetHWnd()) {
+            if (GetCursorPos(&p)) {
+                if (ScreenToClient(GetHWnd(), &p)) {
+                    PrevMousePosX = MousePosX;
+                    PrevMousePosY = MousePosY;
+                    MousePosX = static_cast<float>(p.x);
+                    MousePosY = static_cast<float>(p.y);
+                }
+            }
+        }
+    }
+    
+    static void CentreCursor() {
+        RECT rect;
+        GetWindowRect(GetHWnd(), &rect);
+
+        int x = rect.left + (rect.right - rect.left) / 2;
+        int y = rect.top + (rect.bottom - rect.top) / 2;
+
+        SetCursorPos(x, y);
+    }
+
+    static void ShutdownMouse() {
+        if (gMouse) {
+            gMouse->Unacquire();
+            gMouse->Release();
+            gMouse = nullptr;
+        }
+
+        if (gDInput) {
+            gDInput->Release();
+            gDInput = nullptr;
+        }
+    }
+
     static void DoColorPulse() {
         static float pulse = 1.0f;
         static bool reverse = false;
@@ -697,14 +781,14 @@ public:
         RenderStateSet(D3DRENDERSTATE_ZWRITEENABLE, FALSE);
         RenderStateSet(D3DRENDERSTATE_VERTEXBLEND, (void*)(c0.a != 255));
 
-        DrawPrimitive(D3DPT_TRIANGLEFAN, CSprite2d::ms_aVertices, 4);
+        RenderPrimitive(D3DPT_TRIANGLEFAN, CSprite2d::ms_aVertices, 4);
 
         RenderStateSet(D3DRENDERSTATE_ZENABLE, (void*)TRUE);
         RenderStateSet(D3DRENDERSTATE_ZWRITEENABLE, (void*)TRUE);
         RenderStateSet(D3DRENDERSTATE_SHADEMODE, (void*)D3DSHADE_GOURAUD);
     }
 
-    static CRGBA GetColFromRatio(float ratio, char alpha) {
+    static CRGBA GetColFromRatio(float ratio, unsigned char alpha) {
         ratio = Clamp(ratio, 0.0f, 1.0f);
         int normalized = int(ratio * 256 * 6);
         int region = normalized / 256;
@@ -756,27 +840,27 @@ public:
         CSprite2d::DrawRect(CRect(ScaleXKeepCentered(20.0f - 2.0f), ScaleY(REDEFINE_TEXT_Y - 2.0f - 2.0f), ScaleXKeepCentered(DEFAULT_SCREEN_WIDTH - 20.0f + 2.0f), ScaleY(REDEFINE_TEXT_Y + (REDEFINE_RECT_SIZE * 11) + 2.0f + 2.0f)), CRGBA(125, 125, 125, 255));
         CSprite2d::DrawRect(CRect(ScaleXKeepCentered(20.0f), ScaleY(REDEFINE_TEXT_Y - 2.0f), ScaleXKeepCentered(DEFAULT_SCREEN_WIDTH - 20.0f), ScaleY(REDEFINE_TEXT_Y + (REDEFINE_RECT_SIZE * 11) + 2.0f)), CRGBA(0, 0, 32, 255));
 
-        wchar_t* str = BobTheText->Get("contcur");
-        str = UpperCase(str);
-        PrintString(str, ScaleXKeepCentered(40) * 16384, ScaleY(10) * 16384, _this->m_nFontStyle + 9, ScaleY(1.0f) * 16384, 2, 0, 0, 0);
+        wchar_t* str = L"SETUP CONTROLS";//BobTheText->Get("contcur");
+        //str = UpperCase(str);
+        CFont::PrintString(str, ScaleXKeepCentered(40) * 16384, ScaleY(10) * 16384, _this->m_nFontStyle + 9, ScaleY(1.0f) * 16384, 8, 5, 0, 0);
 
-        PrintString(L"ACTION", ScaleXKeepCentered(30) * 16384, ScaleY(128) * 16384, _this->m_nFontStyle, ScaleY(0.8f) * 16384, 2, 0, 0, 0);
+        CFont::PrintString(L"ACTION", ScaleXKeepCentered(30) * 16384, ScaleY(128) * 16384, _this->m_nFontStyle, ScaleY(0.8f) * 16384, 2, 0, 0, 0);
         
-        int s = (GetStringWidth(L"KEY", _this->m_nFontStyle) * (0.8f));
-        PrintString(L"KEY", ScaleXKeepCentered(DEFAULT_SCREEN_WIDTH - 30 - s) * 16384, ScaleY(128) * 16384, _this->m_nFontStyle, ScaleY(0.8f) * 16384, 2, 0, 0, 0);
+        int s = (CFont::GetStringWidth(L"KEY", _this->m_nFontStyle) * (0.8f));
+        CFont::PrintString(L"KEY", ScaleXKeepCentered(DEFAULT_SCREEN_WIDTH - 30 - s) * 16384, ScaleY(128) * 16384, _this->m_nFontStyle, ScaleY(0.8f) * 16384, 2, 0, 0, 0);
 
-        std::vector<const char*> controls = {
-            "forward",
-            "back",
-            "left",
-            "right",
-            "attack",
-            "enter",
-            "jump",
-            "prev",
-            "next",
-            "special",
-            "spec2",
+        std::vector<const wchar_t*> controls = {
+            L"FORWARD", //"forward",
+            L"BACKWARD", //"back",
+            L"LEFT", //"left",
+            L"RIGHT", //"right",
+            L"ATTACK", //"attack",
+            L"ENTER/EXIT", //"enter",
+            L"HANDBRAKE/JUMP", //"jump",
+            L"PREVIOUS WEAPON", //"prev",
+            L"NEXT WEAPON", //"next",
+            L"SPECIAL", //"special",
+            L"SPECIAL 2", //"spec2",
         };
 
         int i = 0;
@@ -784,8 +868,8 @@ public:
             float x = (float)_this->m_MenuPages[_this->m_nCurrentMenuPage].items[i].x;
             float y = (float)_this->m_MenuPages[_this->m_nCurrentMenuPage].items[i].y;
 
-            wchar_t* s = UpperCase(BobTheText->Get(it));
-            PrintString(s, ScaleXKeepCentered(x) * 16384, ScaleY(y - 1.0f) * 16384, _this->m_nFontStyle, ScaleY(1.0f) * 16384, 2, 0, 0, 0);
+            //wchar_t* s = UpperCase(BobTheText->Get(it));
+            CFont::PrintString(it, ScaleXKeepCentered(x) * 16384, ScaleY(y - 1.0f) * 16384, _this->m_nFontStyle, ScaleY(1.0f) * 16384, 2, 0, 0, 0);
             i++;
         }
     }
@@ -816,21 +900,21 @@ public:
         previousScreenResIndex = currentScreenResIndex;
     }
 
-    static void PopulateCustomFrontend(CMenuManager* _this) {
+    static void PopulateCustomMenu(CMenuManager* _this) {
 #define MENUPAGE_12_FIRST_ENTRY_Y (160)
 #define MENUPAGE_12_FIRST_SPACING_Y (32)
 
         // MENUPAGE_12
-        _this->m_MenuPages[MENUPAGE_12].currentMenuItem = 0;
+        //_this->m_MenuPages[MENUPAGE_12].currentMenuItem = 0;
         _this->m_MenuPages[MENUPAGE_12].initialMenuItem = 0;
 
-        _this->m_MenuPages[MENUPAGE_12].numMenuItems = 8;
+        _this->m_MenuPages[MENUPAGE_12].numMenuItems = 9;
         // red controls
         _this->m_MenuPages[MENUPAGE_12].items[0].action = MENUACTION_CHANGEPAGE;
         _this->m_MenuPages[MENUPAGE_12].items[0].x = 300;
         _this->m_MenuPages[MENUPAGE_12].items[0].y = MENUPAGE_12_FIRST_ENTRY_Y;
 
-        wchar_t* str = BobTheText->Get("contcur");
+        wchar_t* str = L"SETUP CONTROLS";//BobTheText->Get("contcur");
         str = UpperCase(str);
         wcscpy(_this->m_MenuPages[MENUPAGE_12].items[0].str, str);
         _this->m_MenuPages[MENUPAGE_12].items[0].targetPage = MENUPAGE_13;
@@ -883,13 +967,21 @@ public:
         wcscpy(_this->m_MenuPages[MENUPAGE_12].items[6].str, L"");
         _this->m_MenuPages[MENUPAGE_12].items[6].targetPage = MENUACTION_NONE;
 
-        // restore default
-        _this->m_MenuPages[MENUPAGE_12].items[7].action = CUSTOMMENUACTION_RESTOREDEFAULT;
+        // lang
+        _this->m_MenuPages[MENUPAGE_12].items[7].action = CUSTOMMENUACTION_MOUSECONTROLLEDHEADING;
         _this->m_MenuPages[MENUPAGE_12].items[7].x = 300;
         _this->m_MenuPages[MENUPAGE_12].items[7].y = MENUPAGE_12_FIRST_ENTRY_Y + (MENUPAGE_12_FIRST_SPACING_Y * 7);
 
-        wcscpy(_this->m_MenuPages[MENUPAGE_12].items[7].str, L"RESTORE DEFAULT");
+        wcscpy(_this->m_MenuPages[MENUPAGE_12].items[7].str, L"MOUSE CONTROL:");
         _this->m_MenuPages[MENUPAGE_12].items[7].targetPage = MENUACTION_NONE;
+
+        // restore default
+        _this->m_MenuPages[MENUPAGE_12].items[8].action = CUSTOMMENUACTION_RESTOREDEFAULT;
+        _this->m_MenuPages[MENUPAGE_12].items[8].x = 300;
+        _this->m_MenuPages[MENUPAGE_12].items[8].y = MENUPAGE_12_FIRST_ENTRY_Y + (MENUPAGE_12_FIRST_SPACING_Y * 8);
+
+        wcscpy(_this->m_MenuPages[MENUPAGE_12].items[8].str, L"RESTORE DEFAULT");
+        _this->m_MenuPages[MENUPAGE_12].items[8].targetPage = MENUACTION_NONE;
 
         // MENUPAGE_13
         _this->m_MenuPages[MENUPAGE_13].numMenuItems = 11;
@@ -910,11 +1002,18 @@ public:
         if (_this->m_nCurrentMenuPage < MENUPAGE_12)
             return;
 
-        for (int i = 0; i < 12; i++) {
-            float x = (float)_this->m_MenuPages[_this->m_nCurrentMenuPage].items[i].x;
-            float y = (float)_this->m_MenuPages[_this->m_nCurrentMenuPage].items[i].y;
+        const int numItems = _this->m_MenuPages[_this->m_nCurrentMenuPage].numMenuItems;
+        for (int i = 0; i < numItems; i++) {
+            float x = static_cast<float>(_this->m_MenuPages[_this->m_nCurrentMenuPage].items[i].x);
+            float y = static_cast<float>(_this->m_MenuPages[_this->m_nCurrentMenuPage].items[i].y);
 
-            int selectedItem = (i == _this->m_MenuPages[_this->m_nCurrentMenuPage].currentMenuItem);
+            bool selectedItem = (i == _this->m_MenuPages[_this->m_nCurrentMenuPage].currentMenuItem) ? 1 : 0;
+            int fontStyle = _this->m_nFontStyle + selectedItem;
+
+            wchar_t* ogStr = _this->m_MenuPages[_this->m_nCurrentMenuPage].items[i].str;
+            if (!ogStr)
+                ogStr = L" ";
+            float leftStringWidth = static_cast<float>(CFont::GetStringWidth(ogStr, fontStyle));
 
             ApplyFontChange(selectedItem);
 
@@ -922,93 +1021,104 @@ public:
 #define MENUPAGE_12_ICON_H (30.0f)
 
 #define MENUPAGE_12_ICON_OFFSET_Y (-4.0f)
-            float xRight = x + 52.0f;
+            if (leftStringWidth <= 1.0f)
+                leftStringWidth = 34.0f;
+
+            leftStringWidth += 16.0f;
+
+            float xRight = x + leftStringWidth;
             int rightStringWidth = 0;
             switch (_this->m_MenuPages[_this->m_nCurrentMenuPage].items[i].action) {
             case CUSTOMMENUACTION_SFX:
-                psxSprites[0].Draw(ScaleXKeepCentered(x), ScaleY(y + MENUPAGE_12_ICON_OFFSET_Y), ScaleX(MENUPAGE_12_ICON_W), ScaleY(MENUPAGE_12_ICON_H), CRGBA(255, !selectedItem ? 255 : 0, !selectedItem ? 255 : 0, selectedItem ? menuColorPulse : 255));
+                psxSprites[PSXSPRITE_SFX].Draw(ScaleXKeepCentered(x), ScaleY(y + MENUPAGE_12_ICON_OFFSET_Y), ScaleX(MENUPAGE_12_ICON_W), ScaleY(MENUPAGE_12_ICON_H), CRGBA(255, !selectedItem ? 255 : 0, !selectedItem ? 255 : 0, selectedItem ? menuColorPulse : 255));
                 DrawSlider(ScaleXKeepCentered(xRight), ScaleY(y + 1.0f), gameSettings.sfxVolume / 127.0f, selectedItem);
                 rightStringWidth = 190;
                 break;
             case CUSTOMMENUACTION_MUSIC:
-                psxSprites[1].Draw(ScaleXKeepCentered(x), ScaleY(y + MENUPAGE_12_ICON_OFFSET_Y), ScaleX(MENUPAGE_12_ICON_W), ScaleY(MENUPAGE_12_ICON_H), CRGBA(255, !selectedItem ? 255 : 0, !selectedItem ? 255 : 0, selectedItem ? menuColorPulse : 255));
+                psxSprites[PSXSPRITE_MUSIC].Draw(ScaleXKeepCentered(x), ScaleY(y + MENUPAGE_12_ICON_OFFSET_Y), ScaleX(MENUPAGE_12_ICON_W), ScaleY(MENUPAGE_12_ICON_H), CRGBA(255, !selectedItem ? 255 : 0, !selectedItem ? 255 : 0, selectedItem ? menuColorPulse : 255));
                 DrawSlider(ScaleXKeepCentered(xRight), ScaleY(y + 1.0f), gameSettings.musicVolume / 127.0f, selectedItem);
                 rightStringWidth = 190;
                 break;
             case CUSTOMMENUACTION_CHANGERES:  
-                psxSprites[2].Draw(ScaleXKeepCentered(x), ScaleY(y + MENUPAGE_12_ICON_OFFSET_Y), ScaleX(MENUPAGE_12_ICON_W), ScaleY(MENUPAGE_12_ICON_H), CRGBA(255, !selectedItem ? 255 : 0, !selectedItem ? 255 : 0, selectedItem ? menuColorPulse : 255));
-                PrintString(listOfRes.at(currentScreenResIndex).str, ScaleXKeepCentered(xRight) * 16384, ScaleY(y) * 16384, _this->m_nFontStyle + selectedItem, ScaleY(1.0f) * 16384, 2, 0, 0, 0);
-                rightStringWidth = GetStringWidth(listOfRes.at(currentScreenResIndex).str, _this->m_nFontStyle + selectedItem);
+                psxSprites[PSXSPRITE_RES].Draw(ScaleXKeepCentered(x), ScaleY(y + MENUPAGE_12_ICON_OFFSET_Y), ScaleX(MENUPAGE_12_ICON_W), ScaleY(MENUPAGE_12_ICON_H), CRGBA(255, !selectedItem ? 255 : 0, !selectedItem ? 255 : 0, selectedItem ? menuColorPulse : 255));
+                CFont::PrintString(listOfRes.at(currentScreenResIndex).str, ScaleXKeepCentered(xRight) * 16384, ScaleY(y) * 16384, fontStyle, ScaleY(1.0f) * 16384, 2, 0, 0, 0);
+                rightStringWidth = CFont::GetStringWidth(listOfRes.at(currentScreenResIndex).str, fontStyle);
                 break;
             case CUSTOMMENUACTION_SCREENTYPE: {
-                psxSprites[3].Draw(ScaleXKeepCentered(x), ScaleY(y + MENUPAGE_12_ICON_OFFSET_Y), ScaleX(MENUPAGE_12_ICON_W), ScaleY(MENUPAGE_12_ICON_H), CRGBA(255, !selectedItem ? 255 : 0, !selectedItem ? 255 : 0, selectedItem ? menuColorPulse : 255));
+                psxSprites[PSXSPRITE_SCREENTYPE].Draw(ScaleXKeepCentered(x), ScaleY(y + MENUPAGE_12_ICON_OFFSET_Y), ScaleX(MENUPAGE_12_ICON_W), ScaleY(MENUPAGE_12_ICON_H), CRGBA(255, !selectedItem ? 255 : 0, !selectedItem ? 255 : 0, selectedItem ? menuColorPulse : 255));
 
                 wchar_t* str = nullptr;
                 switch (gameSettings.screenType) {
                 case 0:
-                    str = BobTheText->Get("fullscr");
+                    str = L"FULLSCREEN";//BobTheText->Get("fullscr");
                     break;
                 case 1:
-                    str = BobTheText->Get("window");
+                    str = L"WINDOWED";//BobTheText->Get("window");
                     break;
                 case 2:
                     str = L"BORDERLESS WINDOWED";
                     break;
                 }
 
-                str = UpperCase(str);
+                //str = UpperCase(str);
 
                 float scale = 1.0f;
-                if (GetStringWidth(str, _this->m_nFontStyle + selectedItem) > 320)
+                if (CFont::GetStringWidth(str, fontStyle) > 320)
                     scale = 0.88f;
 
-                PrintString(str, ScaleXKeepCentered(xRight) * 16384, ScaleY(y) * 16384, _this->m_nFontStyle + selectedItem, ScaleY(scale) * 16384, 2, 0, 0, 0);
-                rightStringWidth = GetStringWidth(str, _this->m_nFontStyle + selectedItem) * scale;
+                CFont::PrintString(str, ScaleXKeepCentered(xRight) * 16384, ScaleY(y) * 16384, fontStyle, ScaleY(scale) * 16384, 2, 0, 0, 0);
+                rightStringWidth = CFont::GetStringWidth(str, fontStyle) * scale;
             } break;
             case CUSTOMMENUACTION_LIGHTING: {
-                psxSprites[5].Draw(ScaleXKeepCentered(x), ScaleY(y + MENUPAGE_12_ICON_OFFSET_Y), ScaleX(MENUPAGE_12_ICON_W), ScaleY(MENUPAGE_12_ICON_H), CRGBA(255, !selectedItem ? 255 : 0, !selectedItem ? 255 : 0, selectedItem ? menuColorPulse : 255));
+                psxSprites[PSXSPRITE_LGHT].Draw(ScaleXKeepCentered(x), ScaleY(y + MENUPAGE_12_ICON_OFFSET_Y), ScaleX(MENUPAGE_12_ICON_W), ScaleY(MENUPAGE_12_ICON_H), CRGBA(255, !selectedItem ? 255 : 0, !selectedItem ? 255 : 0, selectedItem ? menuColorPulse : 255));
 
                 wchar_t* str = nullptr;
                 switch (gameSettings.lightingType) {
                 case 1:
-                    str = BobTheText->Get("dusk");
+                    str = L"DUSK";//BobTheText->Get("dusk");
                     break;
                 default:
-                    str = BobTheText->Get("noon");
+                    str = L"NOON";//BobTheText->Get("noon");
                     break;
                 }
-                str = UpperCase(str);
-                PrintString(str, ScaleXKeepCentered(xRight) * 16384, ScaleY(y) * 16384, _this->m_nFontStyle + selectedItem, ScaleY(1.0f) * 16384, 2, 0, 0, 0);
-                rightStringWidth = GetStringWidth(str, _this->m_nFontStyle + selectedItem);
+                //str = UpperCase(str);
+
+                CFont::PrintString(str, ScaleXKeepCentered(xRight) * 16384, ScaleY(y) * 16384, fontStyle, ScaleY(1.0f) * 16384, selectedItem ? 2 : 8, 13, 0, 0);
+                rightStringWidth = CFont::GetStringWidth(str, fontStyle);
             } break;
             case CUSTOMMENUACTION_LANGUAGE: {
-                psxSprites[4].Draw(ScaleXKeepCentered(x), ScaleY(y + MENUPAGE_12_ICON_OFFSET_Y), ScaleX(MENUPAGE_12_ICON_W), ScaleY(MENUPAGE_12_ICON_H), CRGBA(255, !selectedItem ? 255 : 0, !selectedItem ? 255 : 0, selectedItem ? menuColorPulse : 255));
+                psxSprites[PSXSPRITE_LANG].Draw(ScaleXKeepCentered(x), ScaleY(y + MENUPAGE_12_ICON_OFFSET_Y), ScaleX(MENUPAGE_12_ICON_W), ScaleY(MENUPAGE_12_ICON_H), CRGBA(255, !selectedItem ? 255 : 0, !selectedItem ? 255 : 0, selectedItem ? menuColorPulse : 255));
 
                 wchar_t* str = nullptr;
                 switch (gameSettings.language) {
                 case 'e':
-                    str = BobTheText->Get("english");
+                    str = L"ENGLISH";//BobTheText->Get("english");
                     break;
                 case 'f':
-                    str = BobTheText->Get("french");
+                    str = L"FRENCH";//BobTheText->Get("french");
                     break;
                 case 'g':
-                    str = BobTheText->Get("german");
+                    str = L"GERMAN";//BobTheText->Get("german");
                     break;
                 case 'i':
-                    str = BobTheText->Get("italian");
+                    str = L"ITALIAN";//BobTheText->Get("italian");
                     break;
                 case 's':
-                    str = BobTheText->Get("spanish");
+                    str = L"SPANISH";//BobTheText->Get("spanish");
                     break;
                 case 'j':
-                    str = BobTheText->Get("japenes");
+                    str = L"JAPANESE";//BobTheText->Get("japenes");
                     break;
                 }
 
-                str = UpperCase(str);
-                PrintString(str, ScaleXKeepCentered(xRight) * 16384, ScaleY(y) * 16384, _this->m_nFontStyle + selectedItem, ScaleY(1.0f) * 16384, 2, 0, 0, 0);
-                rightStringWidth = GetStringWidth(str, _this->m_nFontStyle + selectedItem);
+                //str = UpperCase(str);
+                CFont::PrintString(str, ScaleXKeepCentered(xRight) * 16384, ScaleY(y) * 16384, fontStyle, ScaleY(1.0f) * 16384, 2, 0, 0, 0);
+                rightStringWidth = CFont::GetStringWidth(str, fontStyle);
+            } break;
+            case CUSTOMMENUACTION_MOUSECONTROLLEDHEADING: {
+                wchar_t* str = gameSettings.mouseControlledHeading ? L"YES" : L"NO";
+                CFont::PrintString(str, ScaleXKeepCentered(xRight) * 16384, ScaleY(y) * 16384, fontStyle, ScaleY(1.0f) * 16384, 2, 0, 0, 0);
+                rightStringWidth = CFont::GetStringWidth(str, fontStyle);
             } break;
             case CUSTOMMENUACTION_REDEFINEKEY: {
                 const wchar_t* str = dinputKeyNames[gameSettings.controlKeys[i]];
@@ -1028,18 +1138,26 @@ public:
                     fontStyle += 1;
                 }
 
-                int s = (GetStringWidth(str, _this->m_nFontStyle) * (0.7f));
-                PrintString(str, ScaleXKeepCentered(DEFAULT_SCREEN_WIDTH - 30 - s) * 16384, ScaleY(y + 3) * 16384, fontStyle, ScaleY(0.7f) * 16384, 2, 0, 0, 0);
-                rightStringWidth = GetStringWidth(str, _this->m_nFontStyle + selectedItem);
+                int s = (CFont::GetStringWidth(str, fontStyle) * (0.7f));
+                CFont::PrintString(str, ScaleXKeepCentered(DEFAULT_SCREEN_WIDTH - 30 - s) * 16384, ScaleY(y + 3) * 16384, fontStyle, ScaleY(0.7f) * 16384, 2, 0, 0, 0);
+                rightStringWidth = CFont::GetStringWidth(str, fontStyle);
             } break;
             };
 
             if (_this->m_MenuPages[_this->m_nCurrentMenuPage].items[i].action >= CUSTOMMENUACTION_SFX && 
-                _this->m_MenuPages[_this->m_nCurrentMenuPage].items[i].action <= CUSTOMMENUACTION_LIGHTING &&
+                _this->m_MenuPages[_this->m_nCurrentMenuPage].items[i].action <= CUSTOMMENUACTION_MOUSECONTROLLEDHEADING &&
                 selectedItem) {
+                const bool lmb = NewMouseState.buttons[0] && !OldMouseState.buttons[0];
+
                 ApplySpriteChange(true);
-                DrawSprite(6, 37, (ScaleXKeepCentered(xRight - 10.0f)) * 16384, (ScaleY(y + 11.0f)) * 16384, 0, ScaleY(1.0f) * 16384, 2, 0, 0, 0, 0);
-                DrawSprite(6, 38, (ScaleXKeepCentered(xRight + rightStringWidth + 10.0f)) * 16384, (ScaleY(y + 11.0f)) * 16384, 0, ScaleY(1.0f) * 16384, 2, 0, 0, 0, 0);
+                CSprite::DrawSprite(6, 37, (ScaleXKeepCentered(xRight - 10.0f)) * 16384, (ScaleY(y + 11.0f)) * 16384, 0, ScaleY(1.0f) * 16384, 2, 0, 0, 0, 0);
+                if (ShowMouse && CheckHover(ScaleXKeepCentered(xRight - 10.0f - 8.0f), ScaleXKeepCentered(xRight - 10.0f + 8.0f), ScaleY(y + 11.0f - 8.0f), ScaleY(y + 11.0f + 8.0f)))
+                    arrowClick = -1; wasMouseClick = true;
+
+                CSprite::DrawSprite(6, 38, (ScaleXKeepCentered(xRight + rightStringWidth + 10.0f)) * 16384, (ScaleY(y + 11.0f)) * 16384, 0, ScaleY(1.0f) * 16384, 2, 0, 0, 0, 0);
+                if (ShowMouse && CheckHover(ScaleXKeepCentered(xRight + rightStringWidth + 10.0f - 8.0f), ScaleXKeepCentered(xRight + rightStringWidth + 10.0f + 8.0f), ScaleY(y + 11.0f - 8.0f), ScaleY(y + 11.0f + 8.0f)))
+                    arrowClick = 1; wasMouseClick = true;
+
                 ApplySpriteChange(false);
             }
         }
@@ -1053,7 +1171,7 @@ public:
             ratio += 0.0125f;
 
             float y = REDEFINE_TEXT_Y;
-            CRGBA c0 = GetColFromRatio(ratio, 150);
+            CRGBA c0 = GetColFromRatio(ratio, (unsigned char)150);
             CRGBA c1 = c0;
             CRGBA c2 = CRGBA(255 - c0.b, 255 - c0.g, 255 - c0.r, c0.a);
             CRGBA c3 = CRGBA(c0.b, c0.g, c0.r, c0.a);
@@ -1069,25 +1187,25 @@ public:
             if (redefineKey) {
                 const wchar_t* str = L"SELECT A NEW CONTROL";
                 
-                int s = (GetStringWidth(str, _this->m_nFontStyle) * helpSize) / 2;
-                PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(402 * 16384), _this->m_nFontStyle, ScaleY(helpSize) * 16384, 2, 0, 0, 0);
+                int s = (CFont::GetStringWidth(str, _this->m_nFontStyle) * helpSize) / 2;
+                CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(402 * 16384), _this->m_nFontStyle, ScaleY(helpSize) * 16384, 2, 0, 0, 0);
 
                 str = L"FOR THIS ACTION OR";
-                s = (GetStringWidth(str, _this->m_nFontStyle) * helpSize) / 2;
-                PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(422 * 16384), _this->m_nFontStyle, ScaleY(helpSize) * 16384, 2, 0, 0, 0);
+                s = (CFont::GetStringWidth(str, _this->m_nFontStyle) * helpSize) / 2;
+                CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(422 * 16384), _this->m_nFontStyle, ScaleY(helpSize) * 16384, 2, 0, 0, 0);
 
                 str = L"ESC TO CANCEL";
-                s = (GetStringWidth(str, _this->m_nFontStyle) * helpSize) / 2;
-                PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(442 * 16384), _this->m_nFontStyle, ScaleY(helpSize) * 16384, 2, 0, 0, 0);
+                s = (CFont::GetStringWidth(str, _this->m_nFontStyle) * helpSize) / 2;
+                CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(442 * 16384), _this->m_nFontStyle, ScaleY(helpSize) * 16384, 2, 0, 0, 0);
             }
             else {
                 const wchar_t* str = L"DELETE TO CLEAR OR";
-                int s = (GetStringWidth(str, _this->m_nFontStyle) * helpSize) / 2;
-                PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(402 * 16384), _this->m_nFontStyle, ScaleY(helpSize) * 16384, 2, 0, 0, 0);
+                int s = (CFont::GetStringWidth(str, _this->m_nFontStyle) * helpSize) / 2;
+                CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(402 * 16384), _this->m_nFontStyle, ScaleY(helpSize) * 16384, 2, 0, 0, 0);
 
                 str = L"RETURN TO CHANGE";
-                s = (GetStringWidth(str, _this->m_nFontStyle) * helpSize) / 2;
-                PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(422 * 16384), _this->m_nFontStyle, ScaleY(helpSize) * 16384, 2, 0, 0, 0);
+                s = (CFont::GetStringWidth(str, _this->m_nFontStyle) * helpSize) / 2;
+                CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(422 * 16384), _this->m_nFontStyle, ScaleY(helpSize) * 16384, 2, 0, 0, 0);
             }
         } break;
         };
@@ -1110,7 +1228,7 @@ public:
             gameSettings.sfxVolume = Clamp(gameSettings.sfxVolume, 0, 127);
             gameSettings.Save();
 
-            if (gameSettings.sfxVolume > 0 && gameSettings.sfxVolume < 127)
+            if (arrows2 != 0 && gameSettings.sfxVolume > 0 && gameSettings.sfxVolume < 127)
                 PlayFrontendSound(_this, 3);
             break;
         case CUSTOMMENUACTION_MUSIC:
@@ -1118,7 +1236,7 @@ public:
             gameSettings.musicVolume = Clamp(gameSettings.musicVolume, 0, 127);
             gameSettings.Save();
 
-            if (gameSettings.musicVolume > 0 && gameSettings.musicVolume < 127)
+            if (arrows2 != 0 && gameSettings.musicVolume > 0 && gameSettings.musicVolume < 127)
                 PlayFrontendSound(_this, 3);
             break;
         case CUSTOMMENUACTION_CHANGERES:
@@ -1183,6 +1301,9 @@ public:
 
             gameSettings.language = lang[currentLanguage];
             gameSettings.Save();
+
+            _this->PopulateMenu();
+            PopulateCustomMenu(_this);
             break;
         case CUSTOMMENUACTION_REDEFINEKEY:
             if (!redefineKey) {
@@ -1198,12 +1319,31 @@ public:
                 }
             }
             break;
+        case CUSTOMMENUACTION_MOUSECONTROLLEDHEADING:
+            if (arrows > 0 || arrows < 0) {
+                gameSettings.mouseControlledHeading ^= 1;
+                PlayFrontendSound(_this, 3);
+            }
+
+            gameSettings.Save();
+            break;
         case CUSTOMMENUACTION_RESTOREDEFAULT: {
             if (enter) {
                 gameSettings.Clear(true);
                 gameSettings.Save();
             }
         } break;
+        }
+    }
+
+    static void UnboundDoubleKeys(CMenuManager* _this, int i) {
+        int j = 0;
+        for (auto& it : gameSettings.controlKeys) {
+            if (it == i && j != _this->m_MenuPages[_this->m_nCurrentMenuPage].currentMenuItem) {
+                it = 0;
+                break;
+            }
+            j++;
         }
     }
 
@@ -1215,6 +1355,23 @@ public:
         unsigned char left2 = _this->OldKeyState.left;
         unsigned char right2 = _this->OldKeyState.right;
         unsigned char del = _this->OldKeyState.del;
+        bool lmb = NewMouseState.buttons[0] && !OldMouseState.buttons[0];
+
+        if (ShowMouse && arrowClick != 0) {
+            if (arrowClick < 0 && lmb) {
+                left2 += 1;
+                left += 1;
+                enter = 0;
+            }
+
+            if (arrowClick > 0 && lmb) {
+                right += 1;
+                right2 += 1;
+                enter = 0;
+            }
+
+            arrowClick = 0;
+        }
 
         short& currentMenuPage = _this->m_nCurrentMenuPage;
         unsigned short& currentItem = _this->m_MenuPages[currentMenuPage].currentMenuItem;
@@ -1236,17 +1393,59 @@ public:
                         gameSettings.controlKeys[_this->m_MenuPages[_this->m_nCurrentMenuPage].currentMenuItem] = i;
                         gameSettings.Save();
 
-                        int j = 0;
-                        for (auto& it : gameSettings.controlKeys) {
-                            if (it == i && j != _this->m_MenuPages[_this->m_nCurrentMenuPage].currentMenuItem) {
-                                it = 0;
-                                break;
-                            }
-                            j++;
-                        }
-
+                        UnboundDoubleKeys(_this, i);
                         redefineKey = false;
                         return;
+                    }
+                }
+
+                // Mouse support
+                if (!wasMouseClick) {
+                    bool lmb = NewMouseState.buttons[0] && !OldMouseState.buttons[0];
+                    bool rmb = NewMouseState.buttons[1] && !OldMouseState.buttons[1];
+                    bool mmb = NewMouseState.buttons[2] && !OldMouseState.buttons[2];
+                    bool wheelUp = NewMouseState.buttons[3];
+                    bool wheelDown = NewMouseState.buttons[4];
+
+                    if (lmb) {
+                        PlayFrontendSound(_this, 7);
+                        gameSettings.controlKeys[_this->m_MenuPages[_this->m_nCurrentMenuPage].currentMenuItem] = DIK_LMB;
+                        gameSettings.Save();
+
+                        UnboundDoubleKeys(_this, DIK_LMB);
+                        redefineKey = false;
+                    }
+                    else if (rmb) {
+                        PlayFrontendSound(_this, 7);
+                        gameSettings.controlKeys[_this->m_MenuPages[_this->m_nCurrentMenuPage].currentMenuItem] = DIK_RMB;
+                        gameSettings.Save();
+
+                        UnboundDoubleKeys(_this, DIK_RMB);
+                        redefineKey = false;
+                    }
+                    else if (mmb) {
+                        PlayFrontendSound(_this, 7);
+                        gameSettings.controlKeys[_this->m_MenuPages[_this->m_nCurrentMenuPage].currentMenuItem] = DIK_MMB;
+                        gameSettings.Save();
+
+                        UnboundDoubleKeys(_this, DIK_MMB);
+                        redefineKey = false;
+                    }
+                    else if (wheelUp) {
+                        PlayFrontendSound(_this, 7);
+                        gameSettings.controlKeys[_this->m_MenuPages[_this->m_nCurrentMenuPage].currentMenuItem] = DIK_WHEELUP;
+                        gameSettings.Save();
+
+                        UnboundDoubleKeys(_this, DIK_WHEELUP);
+                        redefineKey = false;
+                    }
+                    else if (wheelDown) {
+                        PlayFrontendSound(_this, 7);
+                        gameSettings.controlKeys[_this->m_MenuPages[_this->m_nCurrentMenuPage].currentMenuItem] = DIK_WHEELDN;
+                        gameSettings.Save();
+
+                        UnboundDoubleKeys(_this, DIK_WHEELDN);
+                        redefineKey = false;
                     }
                 }
             }
@@ -1317,12 +1516,37 @@ public:
             CSprite2d::DrawRect(CRect(x, y, x + (w * progress), y + h), CRGBA(0, 0, 255, 255));
     }
 
+    static void DrawMouse(CMenuManager* _this) {
+        if (!ShowMouse &&
+            (PrevMousePosX != MousePosX || PrevMousePosY != MousePosY)) {
+            ShowMouse = true;
+        }
+
+        if (!wasMouseClick) {
+            if (_this &&
+                (_this->NewKeyState.left ||
+                    _this->NewKeyState.right ||
+                    _this->NewKeyState.up ||
+                    _this->NewKeyState.down ||
+                    _this->NewKeyState.enter ||
+                    _this->NewKeyState.esc ||
+                    _this->NewKeyState.del)) {
+                ShowMouse = false;
+            }
+        }
+
+        if (ShowMouse) {
+            psxSprites[PSXSPRITE_MOUSE].Draw(MousePosX + ScaleX(8.0f), MousePosY + ScaleY(4.0f), ScaleX(64.0f), ScaleY(64.0f), CRGBA(100, 100, 100, 50));
+            psxSprites[PSXSPRITE_MOUSE].Draw(MousePosX, MousePosY, ScaleX(64.0f), ScaleY(64.0f), CRGBA(255, 255, 255, 255));
+        }
+    }
+
     static void DrawBackground(CMenuManager* _this) {
         unsigned char left;
         unsigned char right;
         CMenuManager::FindBackground(_this->m_nCurrScreen, &left, &right);
-        GetD3DDevice()->SetRenderState(D3DRENDERSTATE_VERTEXBLEND, TRUE);
-        int offset = (SCREEN_WIDTH - 480.0f * (4.0f / 3.0f)) / 2.0f;
+        //RenderStateSet(D3DRENDERSTATE_VERTEXBLEND, (void*)TRUE);
+
         bool full = _this->m_nCurrScreen == MENUSCREEN_GAMEOVER ||
             _this->m_nCurrScreen == MENUSCREEN_REDBAR ||
             _this->m_nCurrScreen == MENUSCREEN_BLUEBAR ||
@@ -1342,8 +1566,7 @@ public:
         if (full) {
             if (left == 16) {
                 if (randomLoadScreen == -1) {
-                    plugin::InitRandom();
-                    randomLoadScreen = plugin::Random(0, 3);
+                    randomLoadScreen = plugin::Random((unsigned int)0, 3);
                 }
                 left = 25 + randomLoadScreen;
             }
@@ -1433,95 +1656,123 @@ public:
 
     static void DrawPauseBackground() {
         DrawWindow((SCREEN_WIDTH / 2), (SCREEN_HEIGHT / 2) + ScaleY(-10.0f), ScaleX(240.0f), ScaleY(190.0f), true);
-        //CRect rect;
-        //
-        //rect.left = ScaleXKeepCentered(78.0f);
-        //rect.top = ScaleY(40.0f);
-        //rect.right = rect.left + ScaleX(484.0f);
-        //rect.bottom = rect.top + ScaleY(384.0f);
-        //
-        //RenderStateSet(D3DRENDERSTATE_VERTEXBLEND, (void*)TRUE);
-        //
-        //RenderStateSet(D3DRENDERSTATE_SRCBLEND, (void*)D3DBLEND_SRCALPHA);
-        //RenderStateSet(D3DRENDERSTATE_DESTBLEND, (void*)D3DBLEND_DESTCOLOR);
-        //
-        //CSprite2d::DrawRect(rect, CRGBA(33, 66, 16, 255));//CRGBA(5, 45, 0, 255));
-        //CSprite2d::DrawRect(rect, CRGBA(0, 0, 0, 255));
-        //
-        //RenderStateSet(D3DRENDERSTATE_SRCBLEND, (void*)D3DBLEND_SRCALPHA);
-        //RenderStateSet(D3DRENDERSTATE_DESTBLEND, (void*)D3DBLEND_INVSRCALPHA);
-        //
-        //float b = ScaleY(2.0f);
-        //CRect border = rect;
-        //border.left -= b;
-        //border.top -= b;
-        //border.right += b;
-        //border.bottom = rect.top;
-        //CSprite2d::DrawRect(border, CRGBA(100, 100, 100, 255));
-        //
-        //border = rect;
-        //border.left -= b;
-        //border.top = rect.bottom;
-        //border.right += b;
-        //border.bottom = border.top + b;
-        //CSprite2d::DrawRect(border, CRGBA(100, 100, 100, 255));
-        //
-        //border = rect;
-        //border.left -= b;
-        //border.top -= b;
-        //border.right = border.left + b;
-        //border.bottom += b;
-        //CSprite2d::DrawRect(border, CRGBA(100, 100, 100, 255));
-        //
-        //border = rect;
-        //border.left = rect.right;
-        //border.top -= b;
-        //border.right += b;
-        //border.bottom += b;
-        //CSprite2d::DrawRect(border, CRGBA(100, 100, 100, 255));
     }
 
-    FrontendFix() {    
+    static void OpenClosePauseMenu() {
+        for (int i = 0; i < 12; i++) {
+            gReplay->ClearButton(i);
+        }
+
+        NewMouseState.Clear();
+        OldMouseState.Clear();
+
+        if (!showPauseGameQuit) {
+            GetGame()->SwitchUserPause();
+            showPauseMenu = GetGame()->m_eGameStatus == 2;
+            pauseMenuSelectedItem = 0;
+        }
+
+        if (!showPauseMenu) {
+            SampleManager.SetStreamVolume(0, gameSettings.sfxVolume);
+            SampleManager.SetStreamVolume(1, gameSettings.musicVolume);
+        }
+        else {
+            SampleManager.SetStreamVolume(0, 0);
+            SampleManager.SetStreamVolume(1, 0);
+        }
+
+        CentreCursor();
+    }
+
+    static bool CheckHover(float x1, float x2, float y1, float y2) {
+        return (MousePosX > x1 && MousePosX < x2) && (MousePosY > y1 && MousePosY < y2);
+    }
+
+    static void DrawCrosshair(float x, float y, float s) {
+        CRect rect = {};
+        CRGBA col = { 255, 255, 255, 255 };
+
+        float w = ScaleY(0.5f);
+        float h = ScaleY(4.0f);
+        float _x = x;
+        float _y = y;
+
+        y -= s;
+        rect = { x - w, y, x + w, y - h };
+        CSprite2d::DrawRect(rect, col);
+
+        y = _y;
+        y += s;
+        rect = { x - w, y, x + w, y + h };
+        CSprite2d::DrawRect(rect, col);
+        y = _y;
+
+        x -= s;
+        rect = { x - h, y - w, x, y + w };
+        CSprite2d::DrawRect(rect, col);
+
+        x = _x;
+        x += s;
+        rect = { x, y - w, x + h, y + w };
+        CSprite2d::DrawRect(rect, col);
+    }
+
+    bool init;
+
+    FrontendFixII() {
+        settings.Read();
+        init = false;
 #ifdef _DEBUG
-        AllocConsole();
-        freopen("conin$", "r", stdin);
-        freopen("conout$", "w", stdout);
-        freopen("conout$", "w", stderr);
-        std::setvbuf(stdout, NULL, _IONBF, 0);
+        //AllocConsole();
+        //freopen("conin$", "r", stdin);
+        //freopen("conout$", "w", stdout);
+        //freopen("conout$", "w", stderr);
+        //std::setvbuf(stdout, NULL, _IONBF, 0);
 #endif
         plugin::patch::Nop(0x456D0E, 5); // Don't load broken textures
         plugin::Events::initEngineEvent += [&]() {
+            if (init)
+                return;
+
             gameSettings.Load();
 
             for (auto& it : frontendTexFileNames) {
                 CSprite2d* sprite = new CSprite2d();
-                if (!sprite->SetTextureAsTGA((char*)it.c_str()))
+
+                unsigned short w, h;
+                unsigned char* pixels;
+
+                plugin::LoadTGAFromFile(it.c_str(), &w, &h, &pixels);
+
+                if (!sprite->SetTexture(it.c_str(), w, h, 32, pixels))
                     continue;
+
+                delete[] pixels;
 
                 frontendSprites.push_back(sprite);
             }
 
-            skip_quit_confirm = true;
+            //skip_quit_confirm = true;
 
 #if HD_FRONTEND
             logo.SetTexture("data\\frontend\\gtalogo.dds");
 #endif
 
-            SetProcessDPIAware();
             ShowCursor(FALSE);
             SetMousePosition(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2);
             SetResolutionsList();
 
-            psxSprites[0].SetTextureFromRawPixels("sfx", 32, 32, (unsigned char*)sfxSprite);
-            psxSprites[1].SetTextureFromRawPixels("music", 32, 32, (unsigned char*)cdVolSprite);
-            psxSprites[2].SetTextureFromRawPixels("res", 32, 32, (unsigned char*)resSprite);
-            psxSprites[3].SetTextureFromRawPixels("screentype", 32, 32, (unsigned char*)screenTypeSprite);
-            psxSprites[4].SetTextureFromRawPixels("lang", 32, 32, (unsigned char*)langSprite);
-            psxSprites[5].SetTextureFromRawPixels("lighting", 32, 32, (unsigned char*)lightingSprite);
-        
-            BobTheText = new CText(gameSettings.language);
+            psxSprites[0].SetTexture("sfx", 32, 32, 32, (unsigned char*)sfxSprite);
+            psxSprites[1].SetTexture("music", 32, 32, 32, (unsigned char*)cdVolSprite);
+            psxSprites[2].SetTexture("res", 32, 32, 32, (unsigned char*)resSprite);
+            psxSprites[3].SetTexture("screentype", 32, 32, 32, (unsigned char*)screenTypeSprite);
+            psxSprites[4].SetTexture("lang", 32, 32, 32, (unsigned char*)langSprite);
+            psxSprites[5].SetTexture("lighting", 32, 32, 32, (unsigned char*)lightingSprite);
+            psxSprites[6].SetTexture("mouse", 64, 64, 32, (unsigned char*)mouseSprite);
 
-            CText__Load(BobTheText, true);
+            //BobTheText = new CText(gameSettings.language);
+
+            //CText__Load(BobTheText, true);
 
             FStyle = new CStyle();
             FStyle->Load("data\\fstyle.sty");
@@ -1533,6 +1784,12 @@ public:
             FStyleTex->Load();
 
             *gCurrentStyle = DefaultStyle;
+
+            // Mouse input
+            InitMouse();
+            CentreCursor();
+
+            init = true;
         };
 
         plugin::Events::d3dResetEvent += []() {
@@ -1549,7 +1806,42 @@ public:
             }
         };
 
-        plugin::Events::shutdownEngineEvent += []() {
+        //plugin::StdcallEvent <plugin::AddressList<0x44C2DD, plugin::H_CALL>, plugin::PRIORITY_BEFORE, plugin::ArgPickNone, void(int)> onKeyPressReplay;
+        plugin::Events::drawHudEvent += []() {
+            if (gameSettings.mouseControlledHeading && !UsingGamePad) {
+                if (GetGame()->GetIsUserPaused() || gReplay->IsPlayingBack() || showPauseMenu)
+                    return;
+
+                CPlayerPed* playa = GetGame()->m_pCurrentPlayer;
+
+                if (!playa || !playa->GetPed() || !playa->GetPed()->m_pObject || playa->GetPed()->GetCar())
+                    return;
+
+                float minRadius = 4.0f;
+                const float maxRadius = 24.0f;
+                static float s = minRadius;
+
+                CWeapon* weapon = playa->GetPed()->m_pSelectedWeapon;
+                if (weapon &&
+                    weapon->m_eType != eWeaponType::WEAPONTYPE_GRENADE &&
+                    weapon->m_eType != eWeaponType::WEAPONTYPE_MOLOTOV) {
+                    const bool attack = playa->m_bButtonAttack;
+                    minRadius -= (weapon->m_nRange / 100.0f);
+
+                    if (attack && !weapon->m_nTimer)
+                        s += 1.0f;
+                }
+
+                float scale = ScaleY(s);
+                DrawCrosshair(MousePosX, MousePosY, scale);
+                Interp(s, minRadius, plugin::GetTimeStepFix() * 0.2f);
+            }
+        };
+
+        plugin::Events::shutdownEngineEvent += [&]() {
+            if (!init)
+                return;
+
             gameSettings.Save();
 
             for (auto& it : frontendSprites) {
@@ -1565,20 +1857,24 @@ public:
                 it.Delete();
             }
 
-            if (BobTheText) {
-                BobTheText->Unload();
-                delete BobTheText;
-            }
+            //if (BobTheText) {
+            //    BobTheText->Unload();
+            //    delete BobTheText;
+            //}
 
             if (FStyleTex) {
-                FStyleTex->Unload();
+                //FStyleTex->Unload();
                 delete FStyleTex;
             }
-            
+
             if (FStyle) {
                 FStyle->Unload();
                 delete FStyle;
             }
+
+            ShutdownMouse();
+
+            init = false;
         };
 
         plugin::ThiscallEvent <plugin::AddressList<0x456BC2, plugin::H_CALL, 0x45B47C, plugin::H_CALL>, plugin::PRIORITY_BEFORE, plugin::ArgPickN<CText*, 0>, void(CText*)> onTextLoad;
@@ -1600,40 +1896,45 @@ public:
         plugin::patch::Set<BYTE>(0x453823, 0xEB);
 
         // No credits on quit
-        plugin::patch::SetUShort(0x453EFB + 7, 258);
+        //plugin::patch::SetUShort(0x453EFB + 7, 258);
+
+        // No credits on esc press
+        plugin::patch::Nop(0x459AD6, 9);
 
         // No demo
-        plugin::patch::Set<BYTE>(0x45A349, 0xEB);
-        plugin::patch::Set<BYTE>(0x45A36C + 3, 0);
+        //plugin::patch::Set<BYTE>(0x45A349, 0xEB);
+        //plugin::patch::Set<BYTE>(0x45A36C + 3, 0);
 
         // No sampman delay
-        plugin::patch::Nop(0x4B6823, 8);
+        //plugin::patch::Nop(0x4B6823, 8);
         //plugin::patch::Set<BYTE>(0x4B700D, 0xEB);
         //plugin::patch::Set<BYTE>(0x4B6802, 0x75);
 
         // Fix frontend
-        auto menuPrintString = [](const wchar_t* str, int x, int y, int style, int scale, int* mode, int palette, int enableAlpha, int alpha) {
-            float _x = SCREEN_SCALE_X(x / 16384.0f);
-            float _y = SCREEN_SCALE_Y(y / 16384.0f);
-            float _scale = SCREEN_SCALE_Y(scale / 16384.0f);
+        //auto menuPrintString = [](const wchar_t* str, int x, int y, int style, int scale, int* mode, int palette, int enableAlpha, int alpha) {
+        //    float _x = SCREEN_SCALE_X(x / 16384.0f);
+        //    float _y = SCREEN_SCALE_Y(y / 16384.0f);
+        //    float _scale = SCREEN_SCALE_Y(scale / 16384.0f);
+        //
+        //    x = (int)(_x * 16384);
+        //    y = (int)(_y * 16384);
+        //    scale = (int)(_scale * 16384);
+        //
+        //    hbMenuPrintString.fun(str, x, y, style, scale, mode, palette, enableAlpha, alpha);
+        //};
 
-            x = (int)(_x * 16384);
-            y = (int)(_y * 16384);
-            scale = (int)(_scale * 16384);
+        //hbMenuPrintString.fun = injector::MakeCALL(0x453A1D, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int)).get();
+        //plugin::patch::RedirectCall(0x453A1D, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
 
-            hbMenuPrintString.fun(str, x, y, style, scale, mode, palette, enableAlpha, alpha);
-        };
+        //hbMenuPrintString.fun = injector::MakeCALL(0x453799, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int)).get();
 
-        hbMenuPrintString.fun = injector::MakeCALL(0x453A1D, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int)).get();
-        plugin::patch::RedirectCall(0x453A1D, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
+        //plugin::patch::RedirectCall(0x453799, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
+        //plugin::patch::RedirectCall(0x4567DC, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
+        //plugin::patch::RedirectCall(0x456A17, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
+        //plugin::patch::RedirectCall(0x4570A7, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
+        //plugin::patch::RedirectCall(0x4580C1, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
+        //plugin::patch::RedirectCall(0x458421, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
 
-        plugin::patch::RedirectCall(0x453799, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
-        plugin::patch::RedirectCall(0x4567DC, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
-        plugin::patch::RedirectCall(0x456A17, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
-        plugin::patch::RedirectCall(0x4570A7, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
-        plugin::patch::RedirectCall(0x4580C1, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
-        plugin::patch::RedirectCall(0x458421, LAMBDA(void, __stdcall, menuPrintString, const wchar_t*, int, int, int, int, int*, int, int, int));
-        
         plugin::StdcallEvent <plugin::AddressList<0x457DB2, plugin::H_CALL>, plugin::PRIORITY_AFTER, plugin::ArgPickNone, void(const wchar_t* str, int x, int y, int style, int scale)> onFrontendTextDraw;
         onFrontendTextDraw.before += [] {
             ApplyFontChange(true);
@@ -1652,19 +1953,19 @@ public:
         //};
 
         auto drawSprite = [](int id1, int id2, int x, int y, int a5, int scale, int a7, int a8, int a9, char a10, char a11) {
-            if (!GetGame()) {
-                float _x = SCREEN_SCALE_X(x / 16384.0f);
-                float _y = SCREEN_SCALE_Y(y / 16384.0f);
-                float _scale = SCREEN_SCALE_Y(scale / 16384.0f);
-        
-                x = (int)(_x * 16384);
-                y = (int)(_y * 16384);
-                scale = (int)(_scale * 16384);
+            //if (!GetGame()) {
+                //float _x = SCREEN_SCALE_X(x / 16384.0f);
+                //float _y = SCREEN_SCALE_Y(y / 16384.0f);
+                //float _scale = SCREEN_SCALE_Y(scale / 16384.0f);
+                //
+                //x = (int)(_x * 16384);
+                //y = (int)(_y * 16384);
+                //scale = (int)(_scale * 16384);
 
-                if (id2 == 38 || id2 == 37)
-                    ApplySpriteChange(true);
-            }
-        
+            if (id2 == 38 || id2 == 37)
+                ApplySpriteChange(true);
+            // }
+
             hbDrawSprite.fun(id1, id2, x, y, a5, scale, a7, a8, a9, a10, a11);
             ApplySpriteChange(false);
         };
@@ -1677,10 +1978,61 @@ public:
         hbDrawSprite.fun = injector::MakeCALL(0x4582EE, LAMBDA(void, __stdcall, drawSprite, int id1, int id2, int x, int y, int a5, int a6, int a7, int a8, int a9, char a10, char a11)).get();
         plugin::patch::RedirectCall(0x4582EE, LAMBDA(void, __stdcall, drawSprite, int id1, int id2, int x, int y, int a5, int a6, int a7, int a8, int a9, char a10, char a11));
 
-        plugin::ThiscallEvent <plugin::AddressList<0x45A2B1, plugin::H_CALL>, plugin::PRIORITY_BEFORE, plugin::ArgPickN<CMenuManager*, 0>, void(CMenuManager*)> onProcessButtonPresses;      
+        plugin::ThiscallEvent <plugin::AddressList<0x45A2B1, plugin::H_CALL>, plugin::PRIORITY_BEFORE, plugin::ArgPickN<CMenuManager*, 0>, void(CMenuManager*)> onProcessButtonPresses;
         onProcessButtonPresses.before += [](CMenuManager* _this) {
             memcpy(oldKeys, newKeys, 256);
             memcpy(newKeys, _this->m_nKeys, 256);
+            UpdateMouse();
+
+            // Mouse support for each page 
+            hoverMenuItem = -1;
+            wasMouseClick = false;
+
+            if (ShowMouse && !redefineKey) {
+                short currentPage = _this->m_nCurrentMenuPage;
+                short numItems = _this->m_MenuPages[_this->m_nCurrentMenuPage].numMenuItems;
+
+                for (int i = 0; i < numItems; i++) {
+                    if (PrevMousePosX == MousePosX || PrevMousePosY == MousePosY)
+                        break;
+
+                    const float x = ScaleXKeepCentered(_this->m_MenuPages[currentPage].items[i].x);
+                    const float y = ScaleY(_this->m_MenuPages[currentPage].items[i].y);
+                    float length = ScaleX(320.0f);
+                    const float height = ScaleY(16.0f);
+
+                    if (currentPage == MENUPAGE_13)
+                        length = ScaleX(DEFAULT_SCREEN_WIDTH - 60.0f);
+
+                    const bool hover = CheckHover(x, x + length, y, y + height);
+
+                    if (hover) {
+                        hoverMenuItem = i;
+                        break;
+                    }
+                }
+
+                if (hoverMenuItem != -1 && _this->m_MenuPages[currentPage].currentMenuItem != hoverMenuItem) {
+                    _this->m_MenuPages[currentPage].currentMenuItem = hoverMenuItem;
+                    PlayFrontendSound(_this, 2);
+                }
+
+                if (NewMouseState.buttons[0] && !OldMouseState.buttons[0]) {
+                    _this->NewKeyState.enter = true;
+                    wasMouseClick = true;
+                }
+
+                if (NewMouseState.buttons[4] && !OldMouseState.buttons[4]) {
+                    _this->NewKeyState.left = true;
+                    _this->OldKeyState.left = true;
+                    wasMouseClick = true;
+                }
+                else if (NewMouseState.buttons[3] && !OldMouseState.buttons[3]) {
+                    _this->NewKeyState.right = true;
+                    _this->OldKeyState.right = true;
+                    wasMouseClick = true;
+                }
+            }
         };
 
         onProcessButtonPresses.after += [](CMenuManager* _this) {
@@ -1689,7 +2041,7 @@ public:
 
         plugin::ThiscallEvent <plugin::AddressList<0x456C70, plugin::H_CALL>, plugin::PRIORITY_AFTER, plugin::ArgPickN<CMenuManager*, 0>, void(CMenuManager*)> onPopulateFrontend;
         onPopulateFrontend += [](CMenuManager* _this) {
-            PopulateCustomFrontend(_this);
+            PopulateCustomMenu(_this);
         };
 
         plugin::ThiscallEvent <plugin::AddressList<0x4585B9, plugin::H_JUMP>, plugin::PRIORITY_AFTER, plugin::ArgPickN<CMenuManager*, 0>, void(CMenuManager*)> onFrontendDraw;
@@ -1697,13 +2049,13 @@ public:
         onFrontendDraw.before += [](CMenuManager* _this) {
             DoColorPulse();
             switch (_this->m_nCurrentMenuPage) {
-            case MENUPAGE_13: 
+            case MENUPAGE_13:
                 DrawRedefineCtrlPage(_this);
                 break;
             }
         };
 
-        onFrontendDraw += [](CMenuManager* _this) {
+        onFrontendDraw.after += [](CMenuManager* _this) {
             DrawCustomPages(_this);
         };
 
@@ -1713,319 +2065,441 @@ public:
             memset(_this->m_nKeys, 0, 256);
         };
 
-        plugin::patch::Nop(0x459AF7, 10); // No quit on esc press
+        plugin::Events::menuDrawingEvent += []() {
+            DrawMouse(GetFrontendMenuManager());
+        };
+
+        // No quit on esc press
+        plugin::patch::Nop(0x459AF7, 10);
 
         // Skip intro
-        plugin::patch::Set<BYTE>(0x4D145C + 2, 0);
+        //plugin::patch::Set<BYTE>(0x4D145C + 2, 0);
 
         // 30 fps
         //plugin::patch::Set<BYTE>(0x45A472 + 2, 30);
 
         // Loading screen
-        plugin::patch::Set<BYTE>(0x459639 + 6, MENUSCREEN_LOADING);
-        plugin::patch::Set<BYTE>(0x459A11 + 6, MENUSCREEN_LOADING);
-        plugin::patch::Set<BYTE>(0x4598B4 + 6, MENUSCREEN_LOADING);
-        plugin::patch::Set(0x453BB6 + 1, "");
-        //plugin::patch::Set(0x453B9D + 1, 260);
+        if (settings.EnableLoadingScreen) {
+            plugin::patch::Set<BYTE>(0x459639 + 6, MENUSCREEN_LOADING);
+            plugin::patch::Set<BYTE>(0x459A11 + 6, MENUSCREEN_LOADING);
+            plugin::patch::Set<BYTE>(0x4598B4 + 6, MENUSCREEN_LOADING);
+            plugin::patch::Set(0x453BB6 + 1, "");
+            //plugin::patch::Set(0x453B9D + 1, 260);
 
-        plugin::StdcallEvent <plugin::AddressList<0x453BC1, plugin::H_CALL>, plugin::PRIORITY_AFTER, plugin::ArgPickNone, void(const wchar_t*, int, int, int, int)> drawLoadingBar;
-        drawLoadingBar += [] {
-            gbh_EndScene();
-            Vid_FreeSurface(GetVideoSystem());
-            Vid_FlipBuffers(GetVideoSystem());
-            Vid_ClearScreen(GetVideoSystem(), 0, 0, 0, 0, 0, GetVideoSystem()->width, GetVideoSystem()->height);
+            plugin::StdcallEvent <plugin::AddressList<0x453BC1, plugin::H_CALL>, plugin::PRIORITY_AFTER, plugin::ArgPickNone, void(const wchar_t*, int, int, int, int)> drawLoadingBar;
+            drawLoadingBar += [] {
+                gbh_EndScene();
+                Vid_FreeSurface(GetVideoSystem());
+                Vid_FlipBuffers(GetVideoSystem());
+                Vid_ClearScreen(GetVideoSystem(), 0, 0, 0, 0, 0, GetVideoSystem()->width, GetVideoSystem()->height);
 
-            SampleManager.SetStreamVolume(0, 0);
-            SampleManager.SetStreamVolume(0, 1);
-
-            static float progress = 0.0f;
-            while (progress < 150.0f) {
-                {
-                    plugin::Call<0x4CAEC0>();
-                    gbh_BeginScene();
-                    DrawLoadingBar(ScaleXKeepCentered(70.0f), SCREEN_HEIGHT - ScaleY(70.0f), ScaleX(504.0f), ScaleY(22.0f), progress / 100.0f);
-
-                    const wchar_t* str = L"LOADING";
-                    int s = (GetStringWidth(str, GetFrontendMenuManager()->m_nFontStyle) * (1.2f)) / 2;
-                    PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(143 * 16384), GetFrontendMenuManager()->m_nFontStyle, ScaleY(1.2f) * 16384, 2, 0, 0, 0);
-                    progress += 1.0f;
-                    gbh_EndScene();
-                    Vid_FreeSurface(GetVideoSystem());
-                    Vid_FlipBuffers(GetVideoSystem());
-                    Vid_ClearScreen(GetVideoSystem(), 0, 0, 0, 0, 0, GetVideoSystem()->width, GetVideoSystem()->height);
-                }
-            }
-
-            progress = 0.0f;
-            randomLoadScreen = -1;
-        };       
-
-        // no f3/f4 game vol
-        plugin::patch::Nop(0x4A7145, 42);
-
-        // No f6 game pause
-        plugin::patch::Nop(0x4A71A7, 11);
-
-        // No f8 gta manager
-        plugin::patch::Nop(0x4A71ED, 5);
-
-        // Pause menu key 
-        plugin::patch::Set<BYTE>(0x4A705A, 0xEB);
-
-        auto openClosePauseMenu = [](CPlayerPed* _this) {
-            if (!showPauseGameQuit) {
-                GetGame()->SwitchUserPause();
-                showPauseMenu = GetGame()->m_eGameStatus == 2;
-                pauseMenuSelectedItem = 0;
-            }
-
-            if (!showPauseMenu) {
-                SampleManager.SetStreamVolume(0, gameSettings.sfxVolume);
-                SampleManager.SetStreamVolume(1, gameSettings.musicVolume);
-            }
-            else {
                 SampleManager.SetStreamVolume(0, 0);
-                SampleManager.SetStreamVolume(1, 0);
-            }
-        };
+                SampleManager.SetStreamVolume(0, 1);
 
-        plugin::patch::RedirectCall(0x4A708D, LAMBDA(void, __stdcall, openClosePauseMenu, CPlayerPed*));
+                static float progress = 0.0f;
+                while (progress < 150.0f) {
+                    {
+                        plugin::Call<0x4CAEC0>();
+                        gbh_BeginScene();
 
-        // No freeze
-        plugin::patch::Set<BYTE>(0x418079, 0xEB);
+                        DrawBackground(GetFrontendMenuManager());
+                        DrawLoadingBar(ScaleXKeepCentered(70.0f), SCREEN_HEIGHT - ScaleY(70.0f), ScaleX(504.0f), ScaleY(22.0f), progress / 100.0f);
 
-        // Pause menu
-        auto drawGamePaused = [](int id1, int id2, char x, char y, char style, int* a6, int a7, int a8, char a9) {
-            ApplyStyleSwitch(true);
-            DrawPauseBackground();
-            const int fontStyle = 10;
-            const float fontScale = (1.2f);
-            wchar_t* str = GetTheText()->Get("psxeff");
-            const int mode = 8;
-            const int pal = 8;
-            
-            int s = (GetStringWidth(str, fontStyle) * (fontScale)) / 2;
-            PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(140.0f) * 16384, fontStyle, ScaleY(fontScale) * 16384, pauseMenuSelectedItem == 0 ? 2 : 8, pal, false, 0);
-
-            DrawSlider(ScaleXKeepCentered(320.0f - 128.0f), ScaleY(168.0f), gameSettings.sfxVolume / 127.0f, pauseMenuSelectedItem == 0, 1.32f);
-
-            str = GetTheText()->Get("psxmus");
-            s = (GetStringWidth(str, fontStyle) * (fontScale)) / 2;
-            PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(200.0f) * 16384, fontStyle, ScaleY(fontScale) * 16384, pauseMenuSelectedItem == 1 ? 2 : 8, pal, false, 0);
-            
-            DrawSlider(ScaleXKeepCentered(320.0f - 128.0f), ScaleY(228.0f), gameSettings.musicVolume / 127.0f, pauseMenuSelectedItem == 1, 1.32f);
-
-            RenderStateSet(D3DRENDERSTATE_VERTEXBLEND, (void*)TRUE);
-            RenderStateSet(D3DRENDERSTATE_SRCBLEND, (void*)D3DBLEND_ONE);
-            RenderStateSet(D3DRENDERSTATE_DESTBLEND, (void*)D3DBLEND_ONE);
-
-            psxSprites[0].Draw(ScaleXKeepCentered(158.0f), ScaleY(168.0f), ScaleX(30.0f), ScaleY(20.0f), CRGBA(255, 255, 255, 255));
-            psxSprites[1].Draw(ScaleXKeepCentered(158.0f), ScaleY(228.0f), ScaleX(30.0f), ScaleY(20.0f), CRGBA(255, 255, 255, 255));
-
-            RenderStateSet(D3DRENDERSTATE_SRCBLEND, (void*)D3DBLEND_SRCALPHA);
-            RenderStateSet(D3DRENDERSTATE_DESTBLEND, (void*)D3DBLEND_INVSRCALPHA);
-
-            str = nullptr;
-            const int textSpeed = GetHud()->m_nTextSpeed;     
-            switch (textSpeed) {
-            case 0:
-            case 1:
-                str = GetTheText()->Get("psxslow");
-                break;
-            case 2:
-            case 3:
-                str = GetTheText()->Get("psxnorm");
-                break;
-            case 4:
-            case 5:
-                str = GetTheText()->Get("psxfast");
-                break;
-            };
-
-            wsprintfW(gString, L"%s %s", GetTheText()->Get("psxtext"), str);
-            str = gString;
-
-            s = (GetStringWidth(str, fontStyle) * (fontScale)) / 2;
-            PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(260.0f) * 16384, fontStyle, ScaleY(fontScale) * 16384, pauseMenuSelectedItem == 2 ? 2 : 8, pal, false, 0);
-        
-            str = GetTheText()->Get("psxret");
-            s = (GetStringWidth(str, fontStyle) * (fontScale)) / 2;
-            PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(290.0f) * 16384, fontStyle, ScaleY(fontScale) * 16384, pauseMenuSelectedItem == 3 ? 2 : 8, pal, false, 0);
-
-            str = GetTheText()->Get("psxquit");
-            s = (GetStringWidth(str, fontStyle) * (fontScale)) / 2;
-            PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(320.0f) * 16384, fontStyle, ScaleY(fontScale) * 16384, pauseMenuSelectedItem == 4 ? 2 : 8, pal, false, 0);
-
-            // Help text
-            str = nullptr;
-            switch (pauseMenuSelectedItem) {
-            case 0:
-            case 1:
-                str = GetTheText()->Get("psxchng");
-                break;
-            case 2:
-            case 3:
-            case 4:
-                str = GetTheText()->Get("psxsel");
-                break;
-            }
-
-            if (str) {
-                s = (GetStringWidth(str, fontStyle) * (fontScale)) / 2;
-                PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(380.0f) * 16384, fontStyle, ScaleY(fontScale) * 16384, 2, 0, false, 0);
-            }
-
-            if (showPauseGameQuit) {
-                DrawWindow(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, ScaleX(230.0f), ScaleY(90.0f), false);
-
-                str = GetTheText()->Get("psxsq0");
-                s = (GetStringWidth(str, fontStyle) * (fontScale)) / 2;
-                PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ((SCREEN_HEIGHT / 2) + ScaleY(-80.0f)) * 16384, fontStyle, ScaleY(fontScale) * 16384, 2, 0, false, 0);
-
-                str = GetTheText()->Get("psxsq1");
-                s = (GetStringWidth(str, fontStyle) * (fontScale)) / 2;
-                PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ((SCREEN_HEIGHT / 2) + ScaleY(-60.0f)) * 16384, fontStyle, ScaleY(fontScale) * 16384, 2, 0, false, 0);
-            
-                str = GetTheText()->Get("psxconf");
-                s = (GetStringWidth(str, fontStyle) * (fontScale)) / 2;
-                PrintString(str, ScaleXKeepCentered(320 - s - 98.0f) * 16384, ((SCREEN_HEIGHT / 2) + ScaleY(10.0f)) * 16384, fontStyle, ScaleY(fontScale) * 16384, 2, 0, false, 0);
-
-                str = GetTheText()->Get("psxcanc");
-                s = (GetStringWidth(str, fontStyle) * (fontScale)) / 2;
-                PrintString(str, ScaleXKeepCentered(320 - s + 98.0f) * 16384, ((SCREEN_HEIGHT / 2) + ScaleY(10.0f)) * 16384, fontStyle, ScaleY(fontScale) * 16384, 2, 0, false, 0);
-
-            }
-
-            ApplyStyleSwitch(false);
-        };
-        
-        plugin::patch::RedirectCall(0x4CA080, LAMBDA(void, __stdcall, drawGamePaused, int id1, int id2, char x, char y, char style, int* a6, int a7, int a8, char a9));
-
-        auto drawGamePausedText = [](wchar_t* str, char x, char y, int style, signed int* a5, signed int* a6, signed int* a7, int a8) {
-            ApplyStyleSwitch(true);
-            int s = (GetStringWidth(str, 1) * (1.0f)) / 2;
-            PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(88.0f) * 16384, 10, ScaleY(1.2f) * 16384, 2, 0, 0, 0);
-            ApplyStyleSwitch(false);
-        };
-        plugin::patch::RedirectCall(0x4CA0DD, LAMBDA(void, __stdcall, drawGamePausedText, wchar_t* str, char x, char y, int style, signed int* a5, signed int* a6, signed int* a7, int a8));
-
-        plugin::patch::RedirectJump(0x4CA00D, (void*)0x4CA080);
-
-        // Pause menu stats
-        plugin::patch::SetInt(0x4CA3F6 + 1, 52); // text y
-        plugin::patch::SetInt(0x4CA1A3 + 1, 52 + 12); // sprite y
-
-        plugin::ThiscallEvent <plugin::AddressList<0x4A76A9, plugin::H_CALL>, plugin::PRIORITY_AFTER, plugin::ArgPick2N<CPlayerPed*, 0, unsigned short, 1>, void(CPlayerPed*, unsigned short)> onProcessPlayerKeys;
-        onProcessPlayerKeys += [&](CPlayerPed* _this, unsigned short key) {
-            if (!showPauseMenu)
-                return;
-
-            bool up = key == DIK_UP;
-            bool down = key == DIK_DOWN;
-            bool left = key == DIK_LEFT;
-            bool right = key == DIK_RIGHT;
-            bool enter = key == DIK_RETURN;
-            bool esc = key == DIK_ESCAPE;
-
-            int arrows = left ? -1 : right ? 1 : 0;
-
-            if (showPauseGameQuit) {
-                if (enter) {
-                    GetGame()->SetState(1, 2);
-                    showPauseGameQuit = false;
-                    showPauseMenu = false;
-                }
-                else if (esc) {
-                    showPauseGameQuit = false;
-                }
-            }
-            else {
-                if (up) {
-                    pauseMenuSelectedItem--;
-                    pauseMenuSelectedItem = ClampInverse(pauseMenuSelectedItem, 0, 4);
-                }
-                else if (down) {
-                    pauseMenuSelectedItem++;
-                    pauseMenuSelectedItem = ClampInverse(pauseMenuSelectedItem, 0, 4);
-                }
-
-                if (arrows || enter) {
-                    switch (pauseMenuSelectedItem) {
-                    case 0:
-                        gameSettings.sfxVolume += arrows * (128 / 32);
-                        gameSettings.sfxVolume = Clamp(gameSettings.sfxVolume, 0, 127);
-                        gameSettings.Save();
-                        break;
-                    case 1:
-                        gameSettings.musicVolume += arrows * (128 / 32);
-                        gameSettings.musicVolume = Clamp(gameSettings.musicVolume, 0, 127);
-                        gameSettings.Save();
-                        break;
-                    case 2: {
-                        int& textSpeed = GetHud()->m_nTextSpeed;
-                        if (left) {
-                            switch (textSpeed) {
-                            case 0:
-                            case 1:
-                                textSpeed = 5;
-                                break;
-                            case 2:
-                            case 3:
-                                textSpeed = 1;
-                                break;
-                            case 4:
-                            case 5:
-                                textSpeed = 3;
-                                break;
-                            };
-                        }
-                        else if (right) {
-                            switch (textSpeed) {
-                            case 0:
-                            case 1:
-                                textSpeed = 3;
-                                break;
-                            case 2:
-                            case 3:
-                                textSpeed = 5;
-                                break;
-                            case 4:
-                            case 5:
-                                textSpeed = 1;
-                                break;
-                            };
-                        }
-                    } break;
-                    case 3:
-                        if (enter)
-                            openClosePauseMenu(_this);
-                        break;
-                    case 4:
-                        if (enter)
-                            showPauseGameQuit = true;
-                        break;
+                        const wchar_t* str = L"LOADING";
+                        int s = (CFont::GetStringWidth(str, GetFrontendMenuManager()->m_nFontStyle) * (1.2f)) / 2;
+                        CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(143 * 16384), GetFrontendMenuManager()->m_nFontStyle, ScaleY(1.2f) * 16384, 2, 0, 0, 0);
+                        progress += 1.0f;
+                        gbh_EndScene();
+                        Vid_FreeSurface(GetVideoSystem());
+                        Vid_FlipBuffers(GetVideoSystem());
+                        Vid_ClearScreen(GetVideoSystem(), 0, 0, 0, 0, 0, GetVideoSystem()->field_48, GetVideoSystem()->field_4C);
                     }
                 }
-            }
-        };
 
-        auto setInitialTextSpeed = [](CHud* _this, int) {
-            _this->m_nTextSpeed = 3;
-        };
-        plugin::patch::RedirectJump(0x4C6DC0, LAMBDA(void, __fastcall, setInitialTextSpeed, CHud*, int));
+                progress = 0.0f;
+                randomLoadScreen = -1;
+            };
+        }
 
-        auto stateTwoKeys = [](int key) {
-            //if (GetGame()->m_pCurrentPlayer->m_bShowGameQuitText)
-            //    return GetGame()->m_pCurrentPlayer->m_bShowGameQuitText && (key == DIK_RETURN || key == DIK_ESCAPE);
-            if (showPauseMenu) {
-                return key == DIK_RETURN || key == DIK_UP || key == DIK_DOWN || key == DIK_LEFT || key == DIK_RIGHT || key == DIK_ESCAPE;
-            }
-        };
-        plugin::patch::RedirectJump(0x4C6E20, LAMBDA(bool, __stdcall, stateTwoKeys, int));
+        if (settings.EnablePauseMenu) {
+            // no f3/f4 game vol
+            plugin::patch::Nop(0x4A7145, 42);
+
+            // No f6 game pause
+            plugin::patch::Nop(0x4A71A7, 11);
+
+            // No esc game quit
+            plugin::patch::Nop(0x4A7080, 18);
+
+            // No f8 gta manager
+            plugin::patch::Nop(0x4A71ED, 5);
+
+            // Pause menu key 
+            plugin::patch::Set<BYTE>(0x4A705A, 0xEB);
+
+            //auto openClosePauseMenu = [](void* _this) {
+            //    OpenClosePauseMenu();
+            //};
+            //
+            //auto openClosePauseMenu2 = [](void* _this, int) {
+            //    OpenClosePauseMenu();
+            //};
+            //
+            //plugin::patch::RedirectCall(0x4A708D, LAMBDA(void, __stdcall, openClosePauseMenu, void*));
+            //plugin::patch::RedirectCall(0x4A71AD, LAMBDA(void, __fastcall, openClosePauseMenu2, void*, int));
+
+            // No freeze
+            plugin::patch::Set<BYTE>(0x418079, 0xEB);
+
+            // Pause menu
+            auto drawGamePaused = [](int id1, int id2, char x, char y, char style, int* a6, int a7, int a8, char a9) {
+                ApplyStyleSwitch(true);
+                DrawPauseBackground();
+                const int fontStyle = 10;
+                const float fontScale = (1.2f);
+                wchar_t* str = GetTheText()->Get("psxeff");
+                const int mode = 8;
+                const int pal = 8;
+
+                int s = (CFont::GetStringWidth(str, fontStyle) * (fontScale)) / 2;
+                CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(140.0f) * 16384, fontStyle, ScaleY(fontScale) * 16384, pauseMenuSelectedItem == 0 ? 2 : 8, pal, false, 0);
+                if (!showPauseGameQuit && ShowMouse && CheckHover(ScaleXKeepCentered(320 - s), ScaleXKeepCentered(320 + s), ScaleY(140.0f), ScaleY(140.0f + 50.0f))) pauseMenuSelectedItem = 0;
+
+                DrawSlider(ScaleXKeepCentered(320.0f - 128.0f), ScaleY(168.0f), gameSettings.sfxVolume / 127.0f, pauseMenuSelectedItem == 0, 1.32f);
+
+                str = GetTheText()->Get("psxmus");
+                s = (CFont::GetStringWidth(str, fontStyle) * (fontScale)) / 2;
+                CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(200.0f) * 16384, fontStyle, ScaleY(fontScale) * 16384, pauseMenuSelectedItem == 1 ? 2 : 8, pal, false, 0);
+                if (!showPauseGameQuit && ShowMouse && CheckHover(ScaleXKeepCentered(320 - s), ScaleXKeepCentered(320 + s), ScaleY(200.0f), ScaleY(200.0f + 50.0f))) pauseMenuSelectedItem = 1;
+
+                DrawSlider(ScaleXKeepCentered(320.0f - 128.0f), ScaleY(228.0f), gameSettings.musicVolume / 127.0f, pauseMenuSelectedItem == 1, 1.32f);
+
+                RenderStateSet(D3DRENDERSTATE_VERTEXBLEND, (void*)TRUE);
+                RenderStateSet(D3DRENDERSTATE_SRCBLEND, (void*)D3DBLEND_ONE);
+                RenderStateSet(D3DRENDERSTATE_DESTBLEND, (void*)D3DBLEND_ONE);
+
+                psxSprites[0].Draw(ScaleXKeepCentered(158.0f), ScaleY(168.0f), ScaleX(30.0f), ScaleY(20.0f), CRGBA(255, 255, 255, 255));
+                psxSprites[1].Draw(ScaleXKeepCentered(158.0f), ScaleY(228.0f), ScaleX(30.0f), ScaleY(20.0f), CRGBA(255, 255, 255, 255));
+
+                RenderStateSet(D3DRENDERSTATE_SRCBLEND, (void*)D3DBLEND_SRCALPHA);
+                RenderStateSet(D3DRENDERSTATE_DESTBLEND, (void*)D3DBLEND_INVSRCALPHA);
+
+                str = nullptr;
+                const int textSpeed = GetHud()->m_nTextSpeed;
+                switch (textSpeed) {
+                case 0:
+                case 1:
+                    str = GetTheText()->Get("psxslow");
+                    break;
+                case 2:
+                case 3:
+                    str = GetTheText()->Get("psxnorm");
+                    break;
+                case 4:
+                case 5:
+                    str = GetTheText()->Get("psxfast");
+                    break;
+                };
+
+                wsprintfW(gUString, L"%s %s", GetTheText()->Get("psxtext"), str);
+                str = gUString;
+
+                s = (CFont::GetStringWidth(str, fontStyle) * (fontScale)) / 2;
+                CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(260.0f) * 16384, fontStyle, ScaleY(fontScale) * 16384, pauseMenuSelectedItem == 2 ? 2 : 8, pal, false, 0);
+                if (!showPauseGameQuit && ShowMouse && CheckHover(ScaleXKeepCentered(320 - s), ScaleXKeepCentered(320 + s), ScaleY(260.0f), ScaleY(260.0f + 18.0f))) pauseMenuSelectedItem = 2;
+
+                str = GetTheText()->Get("psxret");
+                s = (CFont::GetStringWidth(str, fontStyle) * (fontScale)) / 2;
+                CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(290.0f) * 16384, fontStyle, ScaleY(fontScale) * 16384, pauseMenuSelectedItem == 3 ? 2 : 8, pal, false, 0);
+                if (!showPauseGameQuit && ShowMouse && CheckHover(ScaleXKeepCentered(320 - s), ScaleXKeepCentered(320 + s), ScaleY(290.0f), ScaleY(290.0f + 18.0f))) pauseMenuSelectedItem = 3;
+
+                str = GetTheText()->Get("psxquit");
+                s = (CFont::GetStringWidth(str, fontStyle) * (fontScale)) / 2;
+                CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(320.0f) * 16384, fontStyle, ScaleY(fontScale) * 16384, pauseMenuSelectedItem == 4 ? 2 : 8, pal, false, 0);
+                if (!showPauseGameQuit && ShowMouse && CheckHover(ScaleXKeepCentered(320 - s), ScaleXKeepCentered(320 + s), ScaleY(320.0f), ScaleY(320.0f + 18.0f))) pauseMenuSelectedItem = 4;
+
+                // Help text
+                str = nullptr;
+                switch (pauseMenuSelectedItem) {
+                case 0:
+                case 1:
+                    str = GetTheText()->Get("psxchng");
+                    break;
+                case 2:
+                case 3:
+                case 4:
+                    str = GetTheText()->Get("psxsel");
+                    break;
+                }
+
+                if (str) {
+                    s = (CFont::GetStringWidth(str, fontStyle) * (fontScale)) / 2;
+                    CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(380.0f) * 16384, fontStyle, ScaleY(fontScale) * 16384, 2, 0, false, 0);
+                }
+
+                if (showPauseGameQuit) {
+                    DrawWindow(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, ScaleX(230.0f), ScaleY(90.0f), false);
+
+                    str = GetTheText()->Get("psxsq0");
+                    s = (CFont::GetStringWidth(str, fontStyle) * (fontScale)) / 2;
+                    CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ((SCREEN_HEIGHT / 2) + ScaleY(-80.0f)) * 16384, fontStyle, ScaleY(fontScale) * 16384, 2, 0, false, 0);
+
+                    str = GetTheText()->Get("psxsq1");
+                    s = (CFont::GetStringWidth(str, fontStyle) * (fontScale)) / 2;
+                    CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ((SCREEN_HEIGHT / 2) + ScaleY(-60.0f)) * 16384, fontStyle, ScaleY(fontScale) * 16384, 2, 0, false, 0);
+
+                    str = GetTheText()->Get("psxconf");
+                    s = (CFont::GetStringWidth(str, fontStyle) * (fontScale)) / 2;
+                    CFont::PrintString(str, ScaleXKeepCentered(320 - s - 98.0f) * 16384, ((SCREEN_HEIGHT / 2) + ScaleY(10.0f)) * 16384, fontStyle, ScaleY(fontScale) * 16384, 2, 0, false, 0);
+
+                    str = GetTheText()->Get("psxcanc");
+                    s = (CFont::GetStringWidth(str, fontStyle) * (fontScale)) / 2;
+                    CFont::PrintString(str, ScaleXKeepCentered(320 - s + 98.0f) * 16384, ((SCREEN_HEIGHT / 2) + ScaleY(10.0f)) * 16384, fontStyle, ScaleY(fontScale) * 16384, 2, 0, false, 0);
+                }
+
+                ApplyStyleSwitch(false);
+
+                DrawMouse(nullptr);
+            };
+
+            plugin::patch::RedirectCall(0x4CA080, LAMBDA(void, __stdcall, drawGamePaused, int id1, int id2, char x, char y, char style, int* a6, int a7, int a8, char a9));
+
+            auto drawGamePausedText = [](wchar_t* str, char x, char y, int style, signed int* a5, signed int* a6, signed int* a7, int a8) {
+                ApplyStyleSwitch(true);
+                int s = (CFont::GetStringWidth(str, 1) * (1.0f)) / 2;
+
+                CFont::PrintString(str, ScaleXKeepCentered(320 - s) * 16384, ScaleY(88.0f) * 16384, 10, ScaleY(1.2f) * 16384, 2, 0, 0, 0);
+                ApplyStyleSwitch(false);
+            };
+            plugin::patch::RedirectCall(0x4CA0DD, LAMBDA(void, __stdcall, drawGamePausedText, wchar_t* str, char x, char y, int style, signed int* a5, signed int* a6, signed int* a7, int a8));
+
+            plugin::patch::RedirectJump(0x4CA00D, (void*)0x4CA080);
+
+            // Pause menu stats
+            plugin::patch::SetInt(0x4CA3F6 + 1, 52); // text y
+            plugin::patch::SetInt(0x4CA1A3 + 1, 52 + 12); // sprite y
+
+            plugin::ThiscallEvent <plugin::AddressList<0x4A7683, plugin::H_CALL>, plugin::PRIORITY_AFTER, plugin::ArgPickN<CPlayerPed*, 0>, void(CPlayerPed*)> onProcessPlayerKeys;
+
+            onProcessPlayerKeys += [&](CPlayerPed* _this) {
+                if (gReplay->IsPlayingBack()) {
+                    return;
+                }
+
+                if (_this == GetGame()->m_pCurrentPlayer) {
+                    // Mouse support
+                    UpdateMouse();
+
+                    CPad* pad = CPad::GetPad(0);
+
+                    if (pad && pad->IsConnected() && pad->NewState.CheckForInput()) {
+                        if (pad->NewState.CheckForInput()) {
+                            UsingGamePad = true;
+                        }
+                    }
+
+                    if ((_this->m_nKeyboardKey >> 12) || abs(NewMouseState.x) || abs(NewMouseState.y)) {
+                        UsingGamePad = false;
+                    }
+
+                    wasMouseClick = false;
+
+                    // Do mouse controls for player in focus
+                    // Button presses
+                    for (int i = 0; i < 12; i++) {
+                        int ctrl = ControlKeys[i];
+
+                        if (ctrl >= DIK_LMB && ctrl <= DIK_WHEELDN) {
+                            if (NewMouseState.buttons[ctrl - DIK_LMB])
+                                gReplay->SetButton(i);
+                            else
+                                gReplay->ClearButton(i);
+                        }
+                    }
+                    // Player rotation
+                    if (gameSettings.mouseControlledHeading && !UsingGamePad) {
+                        if (_this->GetPed() &&
+                            _this->GetPed()->m_pObject &&
+                            _this->GetPed()->m_nPedState != PEDSTATE_FALL &&
+                            _this->GetPed()->m_nPedState != PEDSTATE_DEAD &&
+                            !_this->GetPed()->m_nPedFlags.bIsArrested) {
+                            CEncodedVector in = _this->GetPed()->GetPosition();
+                            CEncodedVector2D out;
+                            _this->GetAuxCamera()->WorldToScreen2D(in, &out);
+
+                            float x = MousePosX - out.FromInt16().x;
+                            float y = MousePosY - out.FromInt16().y;
+                            float rotDest = atan2f(x, y);
+                            float rotCur = DegToRad(_this->GetPed()->m_pObject->m_nRotation / 4.0f);
+                            float angle = LimitRadianAngle(rotDest);
+
+                            if (rotCur - M_PI > rotDest) {
+                                angle += 2 * M_PI;
+                            }
+                            else if (M_PI + rotCur < rotDest) {
+                                angle -= 2 * M_PI;
+                            }
+
+                            short finalRot = static_cast<short>(RadToDeg((angle - rotCur) * plugin::GetTimeStepFix()));
+                            _this->GetPed()->m_pObject->m_nRotation += finalRot;
+
+                            _this->m_bButtonLeft = false;
+                            _this->m_bButtonRight = false;
+                            gReplay->ClearButton(CONTROLKEY_LEFT);
+                            gReplay->ClearButton(CONTROLKEY_RIGHT);
+                        }
+                    }
+
+                    bool up = _this->IsKeyJustDown(DIK_UP);
+                    bool down = _this->IsKeyJustDown(DIK_DOWN);
+                    bool left = _this->IsKeyJustDown(DIK_LEFT);
+                    bool right = _this->IsKeyJustDown(DIK_RIGHT);
+                    bool enter = _this->IsKeyJustDown(DIK_RETURN);
+                    bool esc = _this->IsKeyJustDown(DIK_ESCAPE);
+
+                    if (pad) {
+                        up |= (pad->NewState.DPadUp && !pad->OldState.DPadUp) ? 1 : 0;
+                        down |= (pad->NewState.DPadDown && !pad->OldState.DPadDown) ? 1 : 0;
+                        left |= (pad->NewState.DPadLeft && !pad->OldState.DPadLeft) ? 1 : 0;
+                        right |= (pad->NewState.DPadRight && !pad->OldState.DPadRight) ? 1 : 0;
+                        enter |= (pad->NewState.Cross && !pad->OldState.Cross) ? 1 : 0;
+
+                        if (showPauseGameQuit)
+                            esc |= (pad->NewState.Triangle && !pad->OldState.Triangle) ? 1 : 0;
+                        else
+                            esc |= (pad->NewState.Start && !pad->OldState.Start) ? 1 : 0;
+                    }
+
+                    if (up || down || left || right || enter || esc)
+                        ShowMouse = false;
+
+                    if (esc)
+                        OpenClosePauseMenu();
+
+                    if (!showPauseMenu)
+                        return;
+
+                    if (showPauseGameQuit) {
+                        if (ShowMouse) {
+                            if (CheckHover(ScaleXKeepCentered(320.0f - 98.0f - 42.0f), ScaleXKeepCentered(320.0f - 98.0f + 42.0f), ((SCREEN_HEIGHT / 2) + ScaleY(10.0f)), ((SCREEN_HEIGHT / 2) + ScaleY(10.0f + 18.0f))))
+                                enter |= NewMouseState.buttons[0] && !OldMouseState.buttons[0];
+                            else if (CheckHover(ScaleXKeepCentered(320.0f + 98.0f - 42.0f), ScaleXKeepCentered(320.0f + 98.0f + 42.0f), ((SCREEN_HEIGHT / 2) + ScaleY(10.0f)), ((SCREEN_HEIGHT / 2) + ScaleY(10.0f + 18.0f))))
+                                esc |= NewMouseState.buttons[0] && !OldMouseState.buttons[0];
+                        }
+
+                        if (enter) {
+                            GetGame()->SetState(1, 2);
+                            showPauseGameQuit = false;
+                            showPauseMenu = false;
+                        }
+                        else if (esc) {
+                            showPauseGameQuit = false;
+                        }
+                    }
+                    else {
+                        if (ShowMouse) {
+                            left |= NewMouseState.buttons[4] && !OldMouseState.buttons[4];
+                            right |= NewMouseState.buttons[3] && !OldMouseState.buttons[3];
+                            enter |= NewMouseState.buttons[0] && !OldMouseState.buttons[0];
+                        }
+
+                        int arrows = left ? -1 : right ? 1 : 0;
+
+                        if (up) {
+                            pauseMenuSelectedItem--;
+                            pauseMenuSelectedItem = ClampInverse(pauseMenuSelectedItem, 0, 4);
+                        }
+                        else if (down) {
+                            pauseMenuSelectedItem++;
+                            pauseMenuSelectedItem = ClampInverse(pauseMenuSelectedItem, 0, 4);
+                        }
+
+                        if (arrows != 0 || enter) {
+                            switch (pauseMenuSelectedItem) {
+                            case 0:
+                                gameSettings.sfxVolume += arrows * (128 / 32);
+                                gameSettings.sfxVolume = Clamp(gameSettings.sfxVolume, 0, 127);
+                                gameSettings.Save();
+                                break;
+                            case 1:
+                                gameSettings.musicVolume += arrows * (128 / 32);
+                                gameSettings.musicVolume = Clamp(gameSettings.musicVolume, 0, 127);
+                                gameSettings.Save();
+                                break;
+                            case 2: {
+                                int& textSpeed = GetHud()->m_nTextSpeed;
+                                if (left) {
+                                    switch (textSpeed) {
+                                    case 0:
+                                    case 1:
+                                        textSpeed = 5;
+                                        break;
+                                    case 2:
+                                    case 3:
+                                        textSpeed = 1;
+                                        break;
+                                    case 4:
+                                    case 5:
+                                        textSpeed = 3;
+                                        break;
+                                    };
+                                }
+                                else if (right) {
+                                    switch (textSpeed) {
+                                    case 0:
+                                    case 1:
+                                        textSpeed = 3;
+                                        break;
+                                    case 2:
+                                    case 3:
+                                        textSpeed = 5;
+                                        break;
+                                    case 4:
+                                    case 5:
+                                        textSpeed = 1;
+                                        break;
+                                    };
+                                }
+                            } break;
+                            case 3:
+                                if (enter)
+                                    OpenClosePauseMenu();
+                                break;
+                            case 4:
+                                if (enter)
+                                    showPauseGameQuit = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            };
+
+            // Fix enter key
+            plugin::patch::Set<BYTE>(0x44C2C7, 0xEB);
+
+            auto setInitialTextSpeed = [](CHud* _this, int) {
+                _this->m_nTextSpeed = 3;
+            };
+            plugin::patch::RedirectJump(0x4C6DC0, LAMBDA(void, __fastcall, setInitialTextSpeed, CHud*, int));
+
+            auto stateTwoKeys = [](int key) {
+                //if (GetGame()->m_pCurrentPlayer->m_bShowGameQuitText)
+                //    return GetGame()->m_pCurrentPlayer->m_bShowGameQuitText && (key == DIK_RETURN || key == DIK_ESCAPE);
+                if (showPauseMenu) {
+                    return key == DIK_RETURN || key == DIK_UP || key == DIK_DOWN || key == DIK_LEFT || key == DIK_RIGHT || key == DIK_ESCAPE;
+                }
+
+                return false;
+            };
+            plugin::patch::RedirectJump(0x4C6E20, LAMBDA(bool, __stdcall, stateTwoKeys, int));
+        }
 
         auto resetVideoDevice = []() {
             plugin::Call<0x4CADA0>();
             Vid_CloseScreen(GetVideoSystem());
+
+            GetVideoSystem()->flags |= 0x10;
 
             RECT rect;
             GetClientRect(GetDesktopWindow(), &rect);
@@ -2047,7 +2521,7 @@ public:
                 SetWindowLongPtr(GetHWnd(), GWL_STYLE, WS_VISIBLE | WS_POPUP);
                 SetWindowPos(GetHWnd(), HWND_TOP, rect.left, rect.top, rect.right, rect.bottom, SWP_FRAMECHANGED);
             }
-            else if(start_mode == 1) {
+            else if (start_mode == 1) {
                 int extraWidth = GetSystemMetrics(SM_CXSIZEFRAME);
                 int extraHeight = GetSystemMetrics(SM_CYSIZE) + GetSystemMetrics(SM_CYSIZEFRAME);
                 rect.left -= extraWidth / 2;
@@ -2059,7 +2533,7 @@ public:
             }
             else if (start_mode == 2) {
                 SetWindowLongPtr(GetHWnd(), GWL_STYLE, WS_VISIBLE | WS_POPUP);
-                SetWindowPos(GetHWnd(), HWND_TOP, rect.left, rect.top, rect.right, rect.bottom, SWP_FRAMECHANGED);            
+                SetWindowPos(GetHWnd(), HWND_TOP, rect.left, rect.top, rect.right, rect.bottom, SWP_FRAMECHANGED);
             }
             else {
                 assert(start_mode < 2);
@@ -2079,7 +2553,7 @@ public:
             Vid_ClearScreen(GetVideoSystem(), 0, 0, 0, window_x, window_y, window_width, window_height);
         };
         plugin::patch::RedirectJump(0x4CC5C0, LAMBDA(void, __cdecl, resetVideoDevice));
-            
+
         plugin::patch::Nop(0x4CB73A, 2);
 
         // CRegistry
@@ -2094,11 +2568,9 @@ public:
 
         plugin::patch::Nop(0x4CC67A, 10);
 
-        plugin::patch::Set<BYTE>(0x4CC61E, 0xEB);
-
         plugin::patch::Nop(0x4D0A54, 11); // sfxVol
         plugin::patch::Nop(0x4618AE, 11); // sfxVol
         plugin::patch::Nop(0x4D0A70, 11); // cdVol
         plugin::patch::Nop(0x4618CA, 11); // cdVol
-};
-} frontendFix;
+    };
+} frontendFixII;
