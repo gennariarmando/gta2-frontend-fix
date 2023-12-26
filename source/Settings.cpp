@@ -9,5 +9,6 @@ void Settings::Read() {
     EnablePauseMenu = config["EnablePauseMenu"].asBool();
     EnableLoadingScreen = config["EnableLoadingScreen"].asBool();
     ClipMousePosition = config["ClipMousePosition"].asBool();
+    DefaultControls = config["DefaultControls"].asInt(DEFAULT_CONTROLS_FRONTEND_FIX);
 
 }

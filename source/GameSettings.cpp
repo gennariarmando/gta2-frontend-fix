@@ -10,6 +10,7 @@
 #include "cDMAudio.h"
 #include "Main.h"
 #include "CHud.h"
+#include "Settings.h"
 
 #pragma comment(lib, "shlwapi")
 
@@ -26,18 +27,46 @@ void CGameSettings::Clear(bool clearOnly) {
     }
 
     // Controls
-    controlKeys[CONTROLKEY_FORWARD] = DIK_W;
-    controlKeys[CONTROLKEY_BACKWARD] = DIK_S;
-    controlKeys[CONTROLKEY_LEFT] = DIK_A;
-    controlKeys[CONTROLKEY_RIGHT] = DIK_D;
-    controlKeys[CONTROLKEY_ATTACK] = DIK_LMB;
-    controlKeys[CONTROLKEY_ENTEROREXIT] = DIK_F;
-    controlKeys[CONTROLKEY_HANDBRAKEORJUMP] = DIK_SPACE;
-    controlKeys[CONTROLKEY_PREVWEAPON] = DIK_WHEELDN;
-    controlKeys[CONTROLKEY_NEXTWEAPON] = DIK_WHEELUP;
-    controlKeys[CONTROLKEY_SPECIAL1] = DIK_TAB;
-    controlKeys[CONTROLKEY_SPECIAL2] = DIK_LCONTROL;
-    controlKeys[CONTROLKEY_UNKNOWN] = DIK_RSHIFT;
+    if (settings.DefaultControls == Settings::DEFAULT_CONTROLS_ORIGINAL) {
+        controlKeys[CONTROLKEY_FORWARD] = DIK_UP;
+        controlKeys[CONTROLKEY_BACKWARD] = DIK_DOWN;
+        controlKeys[CONTROLKEY_LEFT] = DIK_LEFT;
+        controlKeys[CONTROLKEY_RIGHT] = DIK_RIGHT;
+        controlKeys[CONTROLKEY_ATTACK] = DIK_LCONTROL;
+        controlKeys[CONTROLKEY_ENTEROREXIT] = DIK_RETURN;
+        controlKeys[CONTROLKEY_HANDBRAKEORJUMP] = DIK_SPACE;
+        controlKeys[CONTROLKEY_PREVWEAPON] = DIK_Z;
+        controlKeys[CONTROLKEY_NEXTWEAPON] = DIK_X;
+        controlKeys[CONTROLKEY_SPECIAL1] = DIK_TAB;
+        controlKeys[CONTROLKEY_SPECIAL2] = DIK_LMENU;
+        controlKeys[CONTROLKEY_UNKNOWN] = DIK_RSHIFT;
+    } else if (settings.DefaultControls == Settings::DEFAULT_CONTROLS_CLASSIC) {
+        controlKeys[CONTROLKEY_FORWARD] = DIK_U;
+        controlKeys[CONTROLKEY_BACKWARD] = DIK_I;
+        controlKeys[CONTROLKEY_LEFT] = DIK_Z;
+        controlKeys[CONTROLKEY_RIGHT] = DIK_X;
+        controlKeys[CONTROLKEY_ATTACK] = DIK_SPACE;
+        controlKeys[CONTROLKEY_ENTEROREXIT] = DIK_W;
+        controlKeys[CONTROLKEY_HANDBRAKEORJUMP] = DIK_P;
+        controlKeys[CONTROLKEY_PREVWEAPON] = DIK_LSHIFT;
+        controlKeys[CONTROLKEY_NEXTWEAPON] = DIK_TAB;
+        controlKeys[CONTROLKEY_SPECIAL1] = DIK_S;
+        controlKeys[CONTROLKEY_SPECIAL2] = DIK_A;
+        controlKeys[CONTROLKEY_UNKNOWN] = DIK_RSHIFT;
+    } else {
+        controlKeys[CONTROLKEY_FORWARD] = DIK_W;
+        controlKeys[CONTROLKEY_BACKWARD] = DIK_S;
+        controlKeys[CONTROLKEY_LEFT] = DIK_A;
+        controlKeys[CONTROLKEY_RIGHT] = DIK_D;
+        controlKeys[CONTROLKEY_ATTACK] = DIK_LMB;
+        controlKeys[CONTROLKEY_ENTEROREXIT] = DIK_F;
+        controlKeys[CONTROLKEY_HANDBRAKEORJUMP] = DIK_SPACE;
+        controlKeys[CONTROLKEY_PREVWEAPON] = DIK_WHEELDN;
+        controlKeys[CONTROLKEY_NEXTWEAPON] = DIK_WHEELUP;
+        controlKeys[CONTROLKEY_SPECIAL1] = DIK_TAB;
+        controlKeys[CONTROLKEY_SPECIAL2] = DIK_LCONTROL;
+        controlKeys[CONTROLKEY_UNKNOWN] = DIK_RSHIFT;
+    }
 
     // Audio
     sfxVolume = 87;
