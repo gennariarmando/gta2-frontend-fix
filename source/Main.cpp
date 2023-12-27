@@ -2529,7 +2529,7 @@ public:
                 rect.right += extraWidth;
                 rect.bottom += extraHeight;
                 SetWindowLong(GetHWnd(), GWL_STYLE, WS_VISIBLE | (WS_OVERLAPPEDWINDOW & ~WS_SIZEBOX));
-                SetWindowPos(GetHWnd(), HWND_NOTOPMOST, rect.left, rect.top, rect.right, rect.bottom, 0);
+                SetWindowPos(GetHWnd(), HWND_NOTOPMOST, rect.left, rect.top, rect.right, rect.bottom, SWP_NOMOVE);
             }
             else if (start_mode == 2) {
                 SetWindowLongPtr(GetHWnd(), GWL_STYLE, WS_VISIBLE | WS_POPUP);
